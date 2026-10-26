@@ -6,7 +6,6 @@ import asyncio
 import logging
 import sys
 
-from telegram.constants import ParseMode
 from telegram.ext import Application, Defaults
 
 from .client import ApiClient
@@ -39,7 +38,11 @@ def build_application(settings: Settings | None = None) -> Application:
             "starting the bot — the token is never read from source."
         )
 
-    defaults = Defaults(parse_mode=ParseMode.MARKDOWN, block=True)
+    # No global parse_mode on purpose: messages are plain text unless the call
+    # site opts into Markdown explicitly. A global default made every message
+    # parse its content, so a stray '_' or '*' from a title, an error code or a
+    # usage string raised "Can't parse entities" and the user got nothing.
+    defaults = Defaults(block=True)
     app = (
         Application.builder()
         .token(settings.telegram_bot_token)

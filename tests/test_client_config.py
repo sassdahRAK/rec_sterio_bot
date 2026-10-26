@@ -33,7 +33,7 @@ async def test_error_envelope_is_parsed(api_client, backend):
     with pytest.raises(ApiError) as excinfo:
         await api_client.create_video("not-a-url")
     assert excinfo.value.code == "validation_failed"
-    assert "validation_failed" in excinfo.value.user_message()
+    assert "validation_failed" in excinfo.value.user_message().replace("\\", "")
 
 
 async def test_unauthorized_becomes_api_error(api_client, backend):
@@ -64,7 +64,7 @@ async def test_network_failure_is_retried_then_raised():
 
     assert transport.calls == 3  # initial attempt + 2 retries
     assert delays == [0.5, 1.0]
-    assert "network_error" in excinfo.value.user_message()
+    assert "network_error" in excinfo.value.user_message().replace("\\", "")
     await client.aclose()
 
 
@@ -102,7 +102,9 @@ def test_secrets_are_redacted_in_public_dict(monkeypatch):
 def test_missing_token_fails_at_startup_not_at_import(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.setenv("BOT_API_TOKEN", "service-secret")
-    settings = Settings()
+    # ``_env_file=None`` keeps the real local .env out of the test: deleting the
+    # env var alone is not enough, because pydantic-settings also reads .env.
+    settings = Settings(_env_file=None)
     assert settings.telegram_bot_token == ""
     with pytest.raises(SystemExit) as excinfo:
         build_application(settings)

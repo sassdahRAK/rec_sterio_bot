@@ -28,6 +28,8 @@ class FakeBackend:
         #: statuses a newly created merge walks through, one per GET /merges/{id}
         self.merge_status_script: list[str] = ["ready"]
         self.requests: list[dict[str, Any]] = []
+        #: bodies received by POST /videos/upload (size, content type, attribution)
+        self.uploads: list[dict[str, Any]] = []
         self.status_script: list[str] = list(DEFAULT_STATUS_SCRIPT)
         self.transcript_content: str = "Hello world. This is a short transcript."
         self.transcript_language: str = "en"
@@ -200,6 +202,53 @@ class FakeBackend:
                 "created_at": "2026-01-01T00:00:00Z",
             }
             self.jobs[job["id"]] = job
+            return JSONResponse(status_code=201, content=video)
+
+        @app.post("/api/v1/videos/upload")
+        async def upload_video(request: Request) -> Any:
+            # Declared before /videos/{video_id} so "upload" is not taken as an id.
+            self._record(request)
+            failure = self._maybe_fail()
+            if failure is not None:
+                return failure
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            raw = await request.body()
+            self.uploads.append(
+                {
+                    "content_type": request.headers.get("content-type", ""),
+                    "bytes": len(raw),
+                    "requested_by": request.headers.get("x-requested-by"),
+                }
+            )
+            if not raw:
+                return self._error(422, "validation_failed", "The uploaded file is empty.")
+            video_id = str(uuid.uuid4())
+            video = {
+                "id": video_id,
+                "source_url": "upload://clip.mp4",
+                "platform": "direct",
+                "title": None,
+                "notes": None,
+                "status": "downloaded",
+                # The upload path already has the file, so the video is
+                # immediately downloadable and the watcher settles fast.
+                "progress": 100,
+                "error": None,
+                "local_path": "/tmp/fake.mp4",
+                "file_size": len(raw),
+                "duration_seconds": 3.0,
+                "mime_type": "video/mp4",
+                "checksum_sha256": "deadbeef",
+                "thumbnail_url": None,
+                "created_by": request.headers.get("x-requested-by", "system"),
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "script_index": 0,
+                "transcripts": [],
+            }
+            self.videos[video_id] = video
             return JSONResponse(status_code=201, content=video)
 
         @app.get("/api/v1/videos/{video_id}")

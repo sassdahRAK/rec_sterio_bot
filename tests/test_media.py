@@ -9,9 +9,65 @@ from __future__ import annotations
 
 import pytest
 
-from bot.handlers.media import MAX_UPLOAD_BYTES, deliver_media, media_command
+from bot.handlers.media import (
+    MAX_UPLOAD_BYTES,
+    _explain_missing_media,
+    deliver_media,
+    media_command,
+)
 
 from .conftest import FakeBot, FakeContext, FakeUpdate
+
+
+class MissingMediaClient:
+    """A client whose media endpoint answers 404, like an undownloaded video."""
+
+    def __init__(self, video: dict) -> None:
+        self.video = video
+
+    async def get_video(self, video_id: str):  # noqa: ANN202
+        return {"id": video_id, **self.video}
+
+    async def get_media(self, video_id: str) -> bytes:
+        from bot.client import ApiError
+
+        raise ApiError("not_found", "Media is not available yet.", status_code=404)
+
+
+def test_explain_missing_media_reports_a_failed_download_with_reason():
+    """A failed download must not be reported as 'not available yet'."""
+    text = _explain_missing_media(
+        {
+            "status": "failed",
+            "error": "ERROR: [TikTok] 123: Unexpected response from webpage request",
+        },
+        "vid-1",
+    )
+    assert "failed" in text.lower()
+    assert "TikTok" in text, "the reason should be surfaced"
+    assert "not available yet" not in text.lower()
+
+
+def test_explain_missing_media_reports_progress_while_downloading():
+    text = _explain_missing_media({"status": "downloading", "progress": 42}, "vid-2")
+    assert "in progress" in text
+    assert "42%" in text
+
+
+@pytest.mark.asyncio
+async def test_deliver_media_404_explains_the_failure_instead_of_a_vague_message():
+    bot = FakeBot()
+    client = MissingMediaClient(
+        {"status": "failed", "error": "ERROR: [TikTok] 9: Unexpected response"}
+    )
+
+    delivered = await deliver_media(bot, 42, client, "vid-3")
+
+    assert delivered is False
+    assert bot.sent, "the user must be told something"
+    body = bot.sent[0]["text"]
+    assert "TikTok" in body
+    assert "not available yet" not in body.lower()
 
 
 class MediaClient:

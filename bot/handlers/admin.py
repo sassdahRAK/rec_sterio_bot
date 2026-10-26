@@ -37,7 +37,7 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     status_filter = None
@@ -48,10 +48,10 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         payload = await client.list_jobs(page_size=20, status=status_filter)
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     items = _items(payload)
@@ -98,26 +98,28 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     args = [a for a in (context.args or []) if a]
     if not args:
-        await message.reply_text("Usage: /retry <video_id>")
+        await message.reply_text("Usage: /retry <video id>")
         return
     video_id = args[0].strip()
     if not is_uuid(video_id):
-        await message.reply_text(f"`{video_id}` is not a valid video id.")
+        await message.reply_text(
+            f"`{video_id}` is not a valid video id.", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
         job = await client.retry_video(video_id)
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     await message.reply_text(
@@ -125,7 +127,8 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             vid=video_id,
             job=job.get("id", "?") if isinstance(job, Mapping) else "?",
             status=job.get("status", "?") if isinstance(job, Mapping) else "?",
-        )
+        ),
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
@@ -140,33 +143,36 @@ async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     args = [a for a in (context.args or []) if a]
     if not args:
-        await message.reply_text("Usage: /jobretry <job_id>")
+        await message.reply_text("Usage: /jobretry <job id>")
         return
     job_id = args[0].strip()
     if not is_uuid(job_id):
-        await message.reply_text(f"`{job_id}` is not a valid job id.")
+        await message.reply_text(
+            f"`{job_id}` is not a valid job id.", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
         job = await client.retry_job(job_id)
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     await message.reply_text(
         "♻️ Job `{job}` re-queued · status `{status}`.".format(
             job=job_id,
             status=job.get("status", "?") if isinstance(job, Mapping) else "?",
-        )
+        ),
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 

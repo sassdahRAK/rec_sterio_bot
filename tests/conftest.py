@@ -25,6 +25,7 @@ class FakeMessage:
         self.chat_id = chat_id
         self.replies: list[dict[str, Any]] = []
         self.documents: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []
 
     async def reply_text(self, text: str, **kwargs: Any) -> FakeMessage:
         self.replies.append({"text": text, **kwargs})
@@ -32,6 +33,13 @@ class FakeMessage:
 
     async def reply_document(self, document: Any = None, **kwargs: Any) -> FakeMessage:
         self.documents.append({"document": document, **kwargs})
+        return self
+
+    async def edit_text(self, text: str, **kwargs: Any) -> FakeMessage:
+        self.edits.append({"text": text, **kwargs})
+        # An edit replaces the message body, so keep replies in sync for tests
+        # that assert on "what the user ends up seeing".
+        self.replies.append({"text": text, **kwargs})
         return self
 
 

@@ -22,13 +22,13 @@ WELCOME = (
     "2. notify you when the download finishes, and\n"
     "3. transcribe it so you can read / correct the transcript.\n\n"
     "*Commands*\n"
-    "/status <video_id> — progress, size, duration, transcript availability\n"
-    "/media <video_id> — send the downloaded file to this chat\n"
-    "/transcript <video_id> — the current transcript (text, or a .txt file when long)\n"
-    "/transcripts <video_id> — every transcript version\n"
-    "/merge <video_id> — reconcile Whisper with a Gemini transcript for higher accuracy\n"
-    "/merges <video_id> — merge history, with an Apply button for ready ones\n"
-    "/apply <merge_id> — make a merged transcript the current version\n"
+    "/status <video id> — progress, size, duration, transcript availability\n"
+    "/media <video id> — send the downloaded file to this chat\n"
+    "/transcript <video id> — the current transcript (text, or a .txt file when long)\n"
+    "/transcripts <video id> — every transcript version\n"
+    "/merge <video id> — reconcile Whisper with a Gemini transcript for higher accuracy\n"
+    "/merges <video id> — merge history, with an Apply button for ready ones\n"
+    "/apply <merge id> — make a merged transcript the current version\n"
     "/help — this message\n\n"
     "Just paste a link and wait. Only public content you have the rights to."
 )
@@ -59,15 +59,17 @@ async def _reply_video(update: Update, context: ContextTypes.DEFAULT_TYPE, video
     except Exception:  # pragma: no cover - defensive
         client = None
     if client is None:
-        await message.reply_text(f"Video `{video_id}` — (backend unavailable)")
+        await message.reply_text(
+            f"Video `{video_id}` — (backend unavailable)", parse_mode=ParseMode.MARKDOWN
+        )
         return
     try:
         video = await client.get_video(video_id)
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     await message.reply_text(
         format_video_status(video),

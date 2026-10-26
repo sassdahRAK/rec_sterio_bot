@@ -29,7 +29,7 @@ async def test_error_envelope_is_surfaced_to_the_user(api_client, backend):
     await handle_link(update, ctx)
 
     text = update.message.replies[0]["text"]
-    assert "validation_failed" in text
+    assert "validation_failed" in text.replace("\\", "")
     assert escape_markdown("must be a valid http(s) URL.") in text
 
 
@@ -43,7 +43,7 @@ async def test_duplicate_video_code_is_surfaced(api_client, backend):
     await handle_link(update, ctx)
 
     text = update.message.replies[0]["text"]
-    assert "duplicate_video" in text
+    assert "duplicate_video" in text.replace("\\", "")
 
 
 async def test_500_from_backend_does_not_crash_the_handler(api_client, backend):
@@ -56,7 +56,7 @@ async def test_500_from_backend_does_not_crash_the_handler(api_client, backend):
 
     assert len(update.message.replies) == 1
     text = update.message.replies[0]["text"]
-    assert "http_500" in text
+    assert "http_500" in text.replace("\\", "")
     assert "boom" in text
 
 
@@ -70,7 +70,7 @@ async def test_status_handler_survives_a_500(api_client, backend):
     ctx = _context(api_client, args=[video_id])
     await status_command(update, ctx)
 
-    assert "http_500" in update.message.replies[0]["text"]
+    assert "http_500" in update.message.replies[0]["text"].replace("\\", "")
 
 
 async def test_global_error_handler_replies_to_the_user():
@@ -81,7 +81,7 @@ async def test_global_error_handler_replies_to_the_user():
     await error_handler(update, ctx)
 
     text = update.message.replies[0]["text"]
-    assert "validation_failed" in text
+    assert "validation_failed" in text.replace("\\", "")
     assert "bad input" in text
 
 
@@ -92,7 +92,7 @@ async def test_global_error_handler_handles_network_errors():
 
     await error_handler(update, ctx)
 
-    assert "network_error" in update.message.replies[0]["text"]
+    assert "network_error" in update.message.replies[0]["text"].replace("\\", "")
 
 
 async def test_global_error_handler_handles_unexpected_errors():

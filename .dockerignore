@@ -1,0 +1,15 @@
+# Never bake secrets or test scaffolding into the image.
+.env
+.env.*
+.venv/
+venv/
+tests/
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.log
+Dockerfile
+.dockerignore

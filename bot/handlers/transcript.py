@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["transcript_command", "transcripts_command"]
 
-USAGE = "Usage: /transcript <video_id>  (the id shown when you queued the link)"
+USAGE = "Usage: /transcript <video id>  (the id shown when you queued the link)"
 
 
 def _limit(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -37,13 +37,15 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     video_id = args[0].strip()
     if not is_uuid(video_id):
-        await message.reply_text(f"`{video_id}` is not a valid video id.\n{USAGE}")
+        await message.reply_text(
+            f"`{video_id}` is not a valid video id.\n{USAGE}", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
@@ -53,17 +55,20 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await message.reply_text(
                 f"No transcript yet for video `{video_id}`.\n"
                 "Transcription runs in the background — try again in a minute, or use "
-                f"/status {video_id}."
+                f"/status {video_id}.",
+                parse_mode=ParseMode.MARKDOWN,
             )
             return
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     if not transcript:
-        await message.reply_text(f"No transcript yet for video `{video_id}`.")
+        await message.reply_text(
+            f"No transcript yet for video `{video_id}`.", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     content = str(transcript.get("content") or "")
@@ -73,13 +78,16 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if status != "ready":
         await message.reply_text(
-            f"Transcript v{version} (source={source}) is `{status}` — not ready yet."
+            f"Transcript v{version} (source={escape_markdown(source)}) is `{status}` — not ready yet.",
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 
     header = f"Transcript v{version} (source={source}) — {len(content)} chars"
     if len(content) <= _limit(context):
-        await message.reply_text(f"{header}\n\n{escape_markdown(content)}")
+        await message.reply_text(
+            f"{header}\n\n{escape_markdown(content)}", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     filename = f"transcript_{video_id}_v{version}.txt"
@@ -100,34 +108,40 @@ async def transcripts_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     args = [a for a in (context.args or []) if a]
     if not args:
-        await message.reply_text("Usage: /transcripts <video_id>")
+        await message.reply_text("Usage: /transcripts <video id>")
         return
     video_id = args[0].strip()
     if not is_uuid(video_id):
-        await message.reply_text(f"`{video_id}` is not a valid video id.")
+        await message.reply_text(
+            f"`{video_id}` is not a valid video id.", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
         payload = await client.list_transcripts(video_id)
     except ApiError as exc:
         if exc.status_code == 404:
-            await message.reply_text(f"No transcripts for video `{video_id}`.")
+            await message.reply_text(
+                f"No transcripts for video `{video_id}`.", parse_mode=ParseMode.MARKDOWN
+            )
             return
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     items = _items(payload)
     if not items:
-        await message.reply_text(f"No transcripts for video `{video_id}`.")
+        await message.reply_text(
+                f"No transcripts for video `{video_id}`.", parse_mode=ParseMode.MARKDOWN
+            )
         return
 
     lines = [f"*Transcript versions* for `{video_id}`"]

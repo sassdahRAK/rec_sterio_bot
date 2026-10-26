@@ -1,0 +1,7 @@
+# recsterio Telegram bot — runtime dependencies only.
+# This is what the production image installs; requirements.txt adds the test
+# and local-fake-backend dependencies on top.
+python-telegram-bot>=21.11,<22
+httpx>=0.27
+pydantic>=2.6
+pydantic-settings>=2.2

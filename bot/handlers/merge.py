@@ -34,9 +34,9 @@ __all__ = [
     "on_callback",
 ]
 
-MERGE_USAGE = "Usage: /merge <video_id> [model]"
-APPLY_USAGE = "Usage: /apply <merge_id>"
-MERGES_USAGE = "Usage: /merges <video_id>"
+MERGE_USAGE = "Usage: /merge <video id> [model]"
+APPLY_USAGE = "Usage: /apply <merge id>"
+MERGES_USAGE = "Usage: /merges <video id>"
 
 TERMINAL_MERGE_STATUSES = frozenset({"ready", "failed"})
 
@@ -92,7 +92,7 @@ def format_merge(merge: Mapping[str, Any]) -> str:
     merge_id = str(merge.get("id") or "?")
     lines = [f"*Merge* `{merge_id[:8]}` — `{status}`"]
     if merge.get("model"):
-        lines.append(f"Model: `{merge['model']}`")
+        lines.append(f"Model: `{escape_markdown(str(merge['model']))}`")
 
     diff = merge.get("diff")
     if isinstance(diff, Mapping):
@@ -200,10 +200,18 @@ async def watch_merge(
         try:
             merge = await client.get_merge(merge_id)
         except ApiError as exc:
-            await _safe_send(bot, chat_id, f"Could not check merge: {exc.user_message()}")
+            await _safe_send(
+                bot, chat_id, f"Could not check merge: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return f"error:{exc.code}"
         except ApiNetworkError as exc:
-            await _safe_send(bot, chat_id, f"Lost contact with the backend: {exc.user_message()}")
+            await _safe_send(
+                bot,
+                chat_id,
+                f"Lost contact with the backend: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return "error:network_error"
 
         status = str(merge.get("status") or "unknown")
@@ -231,6 +239,7 @@ async def watch_merge(
         chat_id,
         f"Merge `{merge_id[:8]}` is still `{status}`. Check with /merges "
         f"{'(video id)'} or the dashboard.",
+        parse_mode=ParseMode.MARKDOWN,
     )
     return "timeout"
 
@@ -253,10 +262,18 @@ async def watch_gemini_then_merge(
         try:
             video = await client.get_video(video_id)
         except ApiError as exc:
-            await _safe_send(bot, chat_id, f"Could not check video: {exc.user_message()}")
+            await _safe_send(
+                bot, chat_id, f"Could not check video: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return f"error:{exc.code}"
         except ApiNetworkError as exc:
-            await _safe_send(bot, chat_id, f"Lost contact with the backend: {exc.user_message()}")
+            await _safe_send(
+                bot,
+                chat_id,
+                f"Lost contact with the backend: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return "error:network_error"
 
         if str(video.get("status")) == "failed":
@@ -265,6 +282,7 @@ async def watch_gemini_then_merge(
                 chat_id,
                 "Gemini transcription failed, so there is nothing to merge. "
                 f"Error: {escape_markdown(str(video.get('error') or 'unknown'))}",
+                parse_mode=ParseMode.MARKDOWN,
             )
             return "failed"
 
@@ -278,10 +296,18 @@ async def watch_gemini_then_merge(
                     requested_by=requested_by,
                 )
             except ApiError as exc:
-                await _safe_send(bot, chat_id, f"Could not start the merge: {exc.user_message()}")
+                await _safe_send(
+                    bot, chat_id, f"Could not start the merge: {exc.user_message()}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 return f"error:{exc.code}"
             except ApiNetworkError as exc:
-                await _safe_send(bot, chat_id, f"Lost contact with the backend: {exc.user_message()}")
+                await _safe_send(
+                    bot,
+                    chat_id,
+                    f"Lost contact with the backend: {exc.user_message()}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 return "error:network_error"
 
             merge_id = _merge_id_of(created)
@@ -292,6 +318,7 @@ async def watch_gemini_then_merge(
                 bot,
                 chat_id,
                 f"Gemini transcript ready — merge `{merge_id[:8]}` queued.",
+                parse_mode=ParseMode.MARKDOWN,
             )
             return await watch_merge(client, bot, chat_id, merge_id, interval=interval)
 
@@ -302,6 +329,7 @@ async def watch_gemini_then_merge(
         chat_id,
         f"Gemini transcript for `{video_id}` is still not ready. "
         f"Try /merge {video_id} again in a few minutes.",
+        parse_mode=ParseMode.MARKDOWN,
     )
     return "timeout"
 
@@ -317,23 +345,26 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     video_id = args[0].strip()
     if not is_uuid(video_id):
-        await message.reply_text(f"`{video_id}` is not a valid video id.\n{MERGE_USAGE}")
+        await message.reply_text(
+            f"`{video_id}` is not a valid video id.\n{MERGE_USAGE}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
     model = args[1].strip() if len(args) > 1 else None
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
         video = await client.get_video(video_id)
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     transcripts = list(video.get("transcripts") or [])
@@ -354,10 +385,10 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 video_id, "gemini", requested_by=actor_for(update)
             )
         except ApiError as exc:
-            await message.reply_text(exc.user_message())
+            await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
             return
         except ApiNetworkError as exc:
-            await message.reply_text(exc.user_message())
+            await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
             return
 
         await message.reply_text(
@@ -384,15 +415,15 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             requested_by=actor_for(update),
         )
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     merge_id = _merge_id_of(created)
     if not merge_id:
-        await message.reply_text("[unexpected_response] The merge returned no id.")
+        await message.reply_text("[unexpected response] The merge returned no id.")
         return
 
     await message.reply_text(
@@ -420,22 +451,25 @@ async def merges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     video_id = args[0].strip()
     if not is_uuid(video_id):
-        await message.reply_text(f"`{video_id}` is not a valid video id.\n{MERGES_USAGE}")
+        await message.reply_text(
+            f"`{video_id}` is not a valid video id.\n{MERGES_USAGE}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
         payload = await client.list_merges(video_id)
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     items = _items(payload)
@@ -453,8 +487,8 @@ async def merges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.append(
             "- `{id}` · {status} · {model} · {created}".format(
                 id=str(item.get("id") or "?")[:8],
-                status=item.get("status", "?"),
-                model=item.get("model") or "?",
+                status=escape_markdown(str(item.get("status", "?"))),
+                model=escape_markdown(str(item.get("model") or "?")),
                 created=item.get("created_at", "?"),
             )
         )
@@ -488,13 +522,16 @@ async def apply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     merge_id = args[0].strip()
     if not is_uuid(merge_id):
-        await message.reply_text(f"`{merge_id}` is not a valid merge id.\n{APPLY_USAGE}")
+        await message.reply_text(
+            f"`{merge_id}` is not a valid merge id.\n{APPLY_USAGE}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
@@ -502,16 +539,17 @@ async def apply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except ApiError as exc:
         if exc.status_code == 409:
             await message.reply_text(
-                f"Merge `{merge_id[:8]}` is not ready yet: {exc.user_message()}"
+                f"Merge `{merge_id[:8]}` is not ready yet: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
             )
             return
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    await message.reply_text(text)
+    await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -559,11 +597,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
             except ApiNetworkError as exc:
-                await query.answer(text=exc.user_message()[:180], show_alert=True)
+                await query.answer(text=exc.message[:180], show_alert=True)
                 return
             await query.answer(text="Applied")
             if query.message is not None:
-                await query.message.reply_text(text)
+                await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
             return
 
         if action == "mcheck" and arg:
@@ -603,4 +641,4 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except ApiError as exc:
         await query.answer(text=exc.message[:180], show_alert=True)
     except ApiNetworkError as exc:
-        await query.answer(text=exc.user_message()[:180], show_alert=True)
+        await query.answer(text=exc.message[:180], show_alert=True)

@@ -10,7 +10,17 @@ from telegram.ext import (
     filters,
 )
 
-from . import admin, errors, links, media, merge, start, status, transcript
+from . import (
+    admin,
+    errors,
+    links,
+    media,
+    merge,
+    start,
+    status,
+    transcript,
+    uploads,
+)
 
 __all__ = ["errors", "register_handlers"]
 
@@ -35,6 +45,14 @@ def register_handlers(app: Application) -> None:
 
     # Plain text messages that may contain a video link.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, links.handle_link))
+
+    # A media file the user sends directly — ingestion without a platform.
+    app.add_handler(
+        MessageHandler(
+            filters.VIDEO | filters.AUDIO | filters.Document.ALL,
+            uploads.handle_media_upload,
+        )
+    )
 
     # Global safety net.
     app.add_error_handler(errors.error_handler)

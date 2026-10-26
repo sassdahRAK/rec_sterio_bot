@@ -28,7 +28,11 @@ __all__ = [
     "escape_markdown",
 ]
 
-_MARKDOWN_SPECIALS = r"_*\[\]()~`>#+\-=|{}.!"
+#: Characters Telegram's *legacy* Markdown (``ParseMode.MARKDOWN``) treats as
+#: entity markers, matching ``telegram.helpers.escape_markdown(version=1)``.
+#: Escaping anything else — ``.``, ``-``, ``(``, ``!`` … — is shown to the user
+#: as a literal backslash, so those are deliberately left alone.
+_MARKDOWN_SPECIALS = "_*`["
 
 
 def escape_markdown(text: str) -> str:
@@ -68,7 +72,7 @@ class ApiNetworkError(Exception):
         self.cause = cause
 
     def user_message(self) -> str:
-        return (
+        return escape_markdown(
             "[network_error] Could not reach the recsterio backend. "
             "Please try again in a moment."
         )
@@ -89,6 +93,7 @@ class ApiClient:
         timeout: float = 15.0,
         max_retries: int = 3,
         backoff: float = 0.5,
+        upload_timeout: float = 300.0,
         transport: httpx.AsyncBaseTransport | None = None,
         client: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] = _sleep,
@@ -97,6 +102,9 @@ class ApiClient:
         self._token = token
         self._max_retries = max_retries
         self._backoff = backoff
+        # Uploads move real megabytes, so they need a much longer timeout than
+        # a JSON call.
+        self._upload_timeout = httpx.Timeout(upload_timeout)
         self._sleep = sleep
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
@@ -365,3 +373,60 @@ class ApiClient:
     async def get_media(self, video_id: str) -> bytes:
         response = await self.request("GET", f"/videos/{video_id}/media", expect_json=False)
         return response.content
+
+    async def upload_video(
+        self,
+        content: bytes,
+        filename: str,
+        *,
+        title: str | None = None,
+        notes: str | None = None,
+        start_transcription: bool = True,
+        requested_by: str | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        """Send a file the user already has to the backend's upload endpoint.
+
+        Ingestion must not depend on a platform serving a download — TikTok and
+        YouTube refuse most server-side requests — so a user can hand the bot a
+        file directly and get the same pipeline behind it.
+        """
+        data: dict[str, Any] = {"start_transcription": str(start_transcription).lower()}
+        if title:
+            data["title"] = title
+        if notes:
+            data["notes"] = notes
+
+        url = f"{self.base_url}/videos/upload"
+        attempt = 0
+        while True:
+            try:
+                response = await self._client.post(
+                    url,
+                    files={"file": (filename, content, content_type)},
+                    data=data,
+                    headers=self._headers(requested_by),
+                    timeout=self._upload_timeout,
+                )
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                attempt += 1
+                if attempt > self._max_retries:
+                    raise ApiNetworkError(
+                        str(exc) or type(exc).__name__, exc
+                    ) from exc
+                await self._sleep(self._backoff * (2 ** (attempt - 1)))
+
+        if response.status_code == 409:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                existing = payload.get("video") or payload
+                if isinstance(existing, dict) and existing.get("id"):
+                    return existing
+            raise self._to_api_error(response)
+        if response.status_code >= 400:
+            raise self._to_api_error(response)
+        return response.json() if response.content else {}

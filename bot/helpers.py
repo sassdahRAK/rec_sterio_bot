@@ -129,7 +129,7 @@ def user_message_for(exc: BaseException) -> str:
         return exc.user_message()
     if isinstance(exc, ApiNetworkError):
         return exc.user_message()
-    return f"[unexpected_error] {exc.__class__.__name__}: {exc}"
+    return f"[unexpected error] {exc.__class__.__name__}: {exc}"
 
 
 def is_uuid(value: str | None) -> bool:

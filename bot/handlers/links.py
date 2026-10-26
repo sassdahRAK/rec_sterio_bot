@@ -119,11 +119,21 @@ async def watch_video(
             video = await client.get_video(video_id)
         except ApiError as exc:
             logger.info("watch %s: api error %s", video_id, exc.code)
-            await _safe_send(bot, chat_id, f"⚠️ Could not check video `{video_id}`: {exc.user_message()}")
+            await _safe_send(
+                bot,
+                chat_id,
+                f"⚠️ Could not check video `{video_id}`: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return f"error:{exc.code}"
         except ApiNetworkError as exc:
             logger.info("watch %s: network error", video_id)
-            await _safe_send(bot, chat_id, f"⚠️ Lost contact with the backend: {exc.user_message()}")
+            await _safe_send(
+                bot,
+                chat_id,
+                f"⚠️ Lost contact with the backend: {exc.user_message()}",
+                parse_mode=ParseMode.MARKDOWN,
+            )
             return "error:network_error"
 
         status = str(video.get("status") or "unknown")
@@ -143,13 +153,14 @@ async def watch_video(
         chat_id,
         f"⏳ Video `{video_id}` is still processing (status: {status}). "
         f"Check back with /status {video_id}",
+        parse_mode=ParseMode.MARKDOWN,
     )
     return "timeout"
 
 
-async def _safe_send(bot: Any, chat_id: int, text: str) -> None:
+async def _safe_send(bot: Any, chat_id: int, text: str, **kwargs: Any) -> None:
     try:
-        await bot.send_message(chat_id=chat_id, text=text)
+        await bot.send_message(chat_id=chat_id, text=text, **kwargs)
     except Exception as exc:  # noqa: BLE001 - never let a notify failure kill the task
         logger.warning("could not notify chat %s: %s", chat_id, exc)
 
@@ -164,7 +175,7 @@ async def _notify_downloaded(
         f"Use /media {video_id} to get the file, "
         f"/transcript {video_id} to read it, or /status {video_id} for details."
     )
-    await _safe_send(bot, chat_id, text)
+    await _safe_send(bot, chat_id, text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def _notify_terminal(
@@ -187,7 +198,7 @@ async def _notify_terminal(
             f"Transcript: {_transcript_summary(video)}\n\n"
             f"Use /transcript {video_id} to read it, or /media {video_id} for the file."
         )
-    await _safe_send(bot, chat_id, text)
+    await _safe_send(bot, chat_id, text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,22 +219,22 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         client = get_client(context)
     except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+        await message.reply_text(f"[bot not ready] {exc}")
         return
 
     try:
         payload = await client.create_video(url, requested_by=actor_for(update))
     except ApiError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
-        await message.reply_text(exc.user_message())
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
     video_id = _video_id_from(payload)
     if not video_id:
         await message.reply_text(
-            "[unexpected_response] The backend accepted the link but returned no video id."
+            "[unexpected response] The backend accepted the link but returned no video id."
         )
         return
 
