@@ -25,6 +25,12 @@ class FakeBackend:
         self.videos: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
         self.merges: dict[str, dict[str, Any]] = {}
+        self.folders: dict[str, dict[str, Any]] = {}
+        self.shares: dict[str, dict[str, Any]] = {}
+        self.passcodes: dict[str, dict[str, Any]] = {}
+        #: body returned by GET /folders/{id}/download; tests enlarge it to
+        #: exercise the "too big for Telegram" fallback.
+        self.zip_bytes = b"PK\x03\x04fake-zip-for-tests"
         #: statuses a newly created merge walks through, one per GET /merges/{id}
         self.merge_status_script: list[str] = ["ready"]
         self.requests: list[dict[str, Any]] = []
@@ -135,6 +141,41 @@ class FakeBackend:
         }
         video.setdefault("transcripts", []).insert(0, transcript)
         return transcript
+
+    def add_folder(
+        self,
+        name: str,
+        *,
+        visibility: str = "private",
+        parent_id: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a folder row directly (test helper)."""
+        folder_id = str(uuid.uuid4())
+        folder = {
+            "id": folder_id,
+            "name": name,
+            "description": description,
+            "visibility": visibility,
+            "owner_id": "00000000-0000-0000-0000-000000000001",
+            "owner_email": "admin@recsterio.local",
+            "parent_id": parent_id,
+            "position": 0,
+        }
+        self.folders[folder_id] = folder
+        return folder
+
+    def file_video(self, video_id: str, folder_id: str | None = None, **overrides: Any) -> None:
+        """Put a video in a folder and mark it ready (test helper)."""
+        video = self.videos[video_id]
+        video["folder_id"] = folder_id
+        video["status"] = "downloaded"
+        video["progress"] = 100
+        video["file_size"] = 1234567
+        video["duration_seconds"] = 61.5
+        video.setdefault("title", "A fake video")
+        for key, value in overrides.items():
+            video[key] = value
 
     # -- routes ------------------------------------------------------------
     def _register_routes(self) -> None:
@@ -500,6 +541,209 @@ class FakeBackend:
             job["status"] = "queued"
             job["attempts"] = 0
             return JSONResponse(status_code=202, content=job)
+
+        # ---------------------------------------------------------- dataset
+        def folder_count(folder_id: str) -> int:
+            return sum(1 for v in self.videos.values() if v.get("folder_id") == folder_id)
+
+        def folder_node(folder: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": folder["id"],
+                "name": folder["name"],
+                "description": folder.get("description"),
+                "visibility": folder["visibility"],
+                "owner_id": folder["owner_id"],
+                "owner_email": folder.get("owner_email"),
+                "parent_id": folder.get("parent_id"),
+                "position": folder.get("position", 0),
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "video_count": folder_count(folder["id"]),
+                "my_role": "editor",
+                "children": [
+                    folder_node(child)
+                    for child in self.folders.values()
+                    if child.get("parent_id") == folder["id"]
+                ],
+            }
+
+        def cards_for(folder_id: str | None = None) -> list[dict[str, Any]]:
+            cards = []
+            for video in self.videos.values():
+                if folder_id and video.get("folder_id") != folder_id:
+                    continue
+                transcript = (video.get("transcripts") or [None])[0]
+                folder = self.folders.get(video.get("folder_id") or "")
+                cards.append(
+                    {
+                        "video_id": video["id"],
+                        "title": video.get("title"),
+                        "source_url": video.get("source_url"),
+                        "status": video.get("status"),
+                        "duration_seconds": video.get("duration_seconds"),
+                        "thumbnail_url": video.get("thumbnail_url"),
+                        "folder_id": video.get("folder_id"),
+                        "folder_name": folder["name"] if folder else None,
+                        "badge": "cleaned" if video.get("cleaned") else "raw",
+                        "transcript_id": transcript["id"] if transcript else None,
+                        "transcript_preview": (
+                            " ".join((transcript.get("content") or "").split())[:280]
+                            if transcript
+                            else None
+                        ),
+                        "audio_available": video.get("status") == "downloaded",
+                        "media_url": f"/api/v1/videos/{video['id']}/media",
+                        "audio_url": f"/api/v1/videos/{video['id']}/audio",
+                        "transcript_url": f"/api/v1/videos/{video['id']}/transcript",
+                    }
+                )
+            return cards
+
+        @app.get("/api/v1/folders")
+        async def list_folders(request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            parent = request.query_params.get("parent_id")
+            items = [
+                folder_node(folder)
+                for folder in self.folders.values()
+                if folder.get("parent_id") == parent
+            ]
+            return {"items": items, "total": len(items)}
+
+        @app.post("/api/v1/folders")
+        async def create_folder(request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            body = await request.json()
+            name = body.get("name")
+            if not name:
+                return self._error(422, "validation_failed", "name is required.")
+            folder_id = str(uuid.uuid4())
+            folder = {
+                "id": folder_id,
+                "name": name,
+                "description": body.get("description"),
+                "visibility": body.get("visibility", "private"),
+                "owner_id": "00000000-0000-0000-0000-000000000001",
+                "owner_email": "admin@recsterio.local",
+                "parent_id": body.get("parent_id"),
+                "position": body.get("position", 0),
+            }
+            self.folders[folder_id] = folder
+            return JSONResponse(status_code=201, content=folder_node(folder))
+
+        @app.get("/api/v1/folders/{folder_id}")
+        async def get_folder(folder_id: str, request: Request) -> Any:
+            self._record(request)
+            folder = self.folders.get(folder_id)
+            if folder is None:
+                return self._error(404, "not_found", "Folder not found.", [{"id": folder_id}])
+            return folder_node(folder)
+
+        @app.get("/api/v1/dataset/cards")
+        async def list_cards(request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            folder_id = request.query_params.get("folder_id")
+            query = (request.query_params.get("q") or "").lower()
+            cleaned = request.query_params.get("cleaned")
+            cards = cards_for(folder_id)
+            if query:
+                cards = [
+                    c
+                    for c in cards
+                    if query in (c.get("title") or "").lower()
+                    or query in (c.get("source_url") or "").lower()
+                ]
+            if cleaned is not None:
+                wanted = cleaned.lower() == "true"
+                cards = [c for c in cards if (c["badge"] == "cleaned") == wanted]
+            page = int(request.query_params.get("page", 1))
+            page_size = int(request.query_params.get("page_size", 20))
+            total = len(cards)
+            start = (page - 1) * page_size
+            return {
+                "items": cards[start : start + page_size],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+
+        @app.post("/api/v1/folders/{folder_id}/shares")
+        async def create_share(folder_id: str, request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            if folder_id not in self.folders:
+                return self._error(404, "not_found", "Folder not found.", [{"id": folder_id}])
+            body = await request.json()
+            share_id = str(uuid.uuid4())
+            share = {
+                "id": share_id,
+                "folder_id": folder_id,
+                "token": uuid.uuid4().hex,
+                "role": body.get("role", "viewer"),
+                "expires_at": body.get("expires_at"),
+                "revoked_at": None,
+                "created_by": request.headers.get("x-requested-by", "system"),
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+            self.shares[share_id] = share
+            return JSONResponse(
+                status_code=201,
+                content={**share, "url": f"https://portal.example.org/share/{share['token']}"},
+            )
+
+        @app.post("/api/v1/folders/{folder_id}/passcodes")
+        async def create_passcode(folder_id: str, request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            if folder_id not in self.folders:
+                return self._error(404, "not_found", "Folder not found.", [{"id": folder_id}])
+            body = await request.json()
+            passcode_id = str(uuid.uuid4())
+            passcode = {
+                "id": passcode_id,
+                "folder_id": folder_id,
+                "label": body.get("label"),
+                "expires_at": body.get("expires_at"),
+                "max_uses": body.get("max_uses"),
+                "max_devices": body.get("max_devices"),
+                "one_time": body.get("one_time", False),
+                "use_count": 0,
+                "device_count": 0,
+                "revoked_at": None,
+                "created_by": request.headers.get("x-requested-by", "system"),
+                "created_at": "2026-01-01T00:00:00Z",
+                # The API generates a code when none is supplied and returns it
+                # exactly once, in this response.
+                "code": body.get("code") or "ABCD-2345",
+            }
+            self.passcodes[passcode_id] = passcode
+            return JSONResponse(status_code=201, content=passcode)
+
+        @app.get("/api/v1/folders/{folder_id}/download")
+        async def download_folder(folder_id: str, request: Request) -> Any:
+            self._record(request)
+            if folder_id not in self.folders:
+                return self._error(404, "not_found", "Folder not found.", [{"id": folder_id}])
+            from fastapi.responses import Response
+
+            return Response(
+                content=self.zip_bytes,
+                media_type="application/zip",
+                headers={"Content-disposition": "attachment; filename=dataset.zip"},
+            )
 
 
 def make_backend(token: str = "test-service-token") -> FakeBackend:

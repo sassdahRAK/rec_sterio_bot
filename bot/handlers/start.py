@@ -30,6 +30,16 @@ WELCOME = (
     "/merges <video id> — merge history, with an Apply button for ready ones\n"
     "/apply <merge id> — make a merged transcript the current version\n"
     "/help — this message\n\n"
+    "*Dataset* (admins only — the bot's token can see private folders)\n"
+    "/folders [parent id] — the folder tree, with visibility and video counts\n"
+    "/folder <folder id> — one folder, its sub-folders and its role\n"
+    "/cards [folder id] [search] — dataset cards, raw and cleaned\n"
+    "/cleaned [folder id] — only the hand-corrected units\n"
+    "/mkdir <name> [--public] [--parent <id>] — create a folder\n"
+    "/share <folder id> <role> [days] — issue a share link\n"
+    "/passcode <folder id> [label] [--uses N] [--devices N] [--one-time] [--days N]\n"
+    "            — issue a door code (shown once; the server stores only a hash)\n"
+    "/zip <folder id> — export the folder and its sub-folders as one archive\n\n"
     "Just paste a link and wait. Only public content you have the rights to."
 )
 

@@ -374,6 +374,114 @@ class ApiClient:
         response = await self.request("GET", f"/videos/{video_id}/media", expect_json=False)
         return response.content
 
+    # -- dataset layer (v2) -----------------------------------------------
+    # The bot authenticates as the service token, which the API treats as an
+    # editor on every folder, so these can address any folder by id.
+    async def list_folders(
+        self,
+        *,
+        parent_id: str | None = None,
+        visibility: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if parent_id:
+            params["parent_id"] = parent_id
+        if visibility:
+            params["visibility"] = visibility
+        return await self.request("GET", "/folders", params=params)
+
+    async def get_folder(self, folder_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"/folders/{folder_id}")
+
+    async def create_folder(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        visibility: str = "private",
+        parent_id: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "name": name,
+            "description": description,
+            "visibility": visibility,
+            "parent_id": parent_id,
+        }
+        return await self.request(
+            "POST", "/folders", json=body, requested_by=requested_by
+        )
+
+    async def list_cards(
+        self,
+        *,
+        folder_id: str | None = None,
+        cleaned: bool | None = None,
+        q: str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"page": page, "page_size": page_size}
+        if folder_id:
+            params["folder_id"] = folder_id
+        if cleaned is not None:
+            params["cleaned"] = str(cleaned).lower()
+        if q:
+            params["q"] = q
+        return await self.request("GET", "/dataset/cards", params=params)
+
+    async def create_share(
+        self,
+        folder_id: str,
+        role: str = "viewer",
+        *,
+        expires_at: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"role": role}
+        if expires_at:
+            body["expires_at"] = expires_at
+        return await self.request(
+            "POST",
+            f"/folders/{folder_id}/shares",
+            json=body,
+            requested_by=requested_by,
+        )
+
+    async def create_passcode(
+        self,
+        folder_id: str,
+        *,
+        code: str | None = None,
+        label: str | None = None,
+        expires_at: str | None = None,
+        max_uses: int | None = None,
+        max_devices: int | None = None,
+        one_time: bool = False,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "code": code,
+            "label": label,
+            "expires_at": expires_at,
+            "max_uses": max_uses,
+            "max_devices": max_devices,
+            "one_time": one_time,
+        }
+        return await self.request(
+            "POST",
+            f"/folders/{folder_id}/passcodes",
+            json=body,
+            requested_by=requested_by,
+        )
+
+    async def download_folder_zip(self, folder_id: str) -> bytes:
+        """The folder and its subtree as one archive (video + audio + transcript)."""
+        response = await self.request(
+            "GET", f"/folders/{folder_id}/download", expect_json=False
+        )
+        return response.content
+
     async def upload_video(
         self,
         content: bytes,

@@ -12,6 +12,7 @@ from telegram.ext import (
 
 from . import (
     admin,
+    dataset,
     errors,
     links,
     media,
@@ -39,6 +40,17 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("jobs", admin.jobs_command))
     app.add_handler(CommandHandler("retry", admin.retry_command))
     app.add_handler(CommandHandler("jobretry", admin.jobretry_command))
+
+    # Dataset surface (v2). Admin-gated, like the job controls: the bot's
+    # service token can see every folder, private ones included.
+    app.add_handler(CommandHandler("folders", dataset.folders_command))
+    app.add_handler(CommandHandler("folder", dataset.folder_command))
+    app.add_handler(CommandHandler("cards", dataset.cards_command))
+    app.add_handler(CommandHandler("cleaned", dataset.cleaned_command))
+    app.add_handler(CommandHandler("mkdir", dataset.mkdir_command))
+    app.add_handler(CommandHandler("share", dataset.share_command))
+    app.add_handler(CommandHandler("passcode", dataset.passcode_command))
+    app.add_handler(CommandHandler("zip", dataset.zip_command))
 
     # Inline buttons (merge apply / re-check / list).
     app.add_handler(CallbackQueryHandler(merge.on_callback))
