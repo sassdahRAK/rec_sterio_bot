@@ -36,6 +36,12 @@ class FakeBackend:
         self.requests: list[dict[str, Any]] = []
         #: bodies received by POST /videos/upload (size, content type, attribution)
         self.uploads: list[dict[str, Any]] = []
+        #: versions created by PUT /videos/{id}/transcript
+        self.saved_transcripts: list[dict[str, Any]] = []
+        #: records written by POST /videos/{id}/tvna
+        self.tvna_records: list[dict[str, Any]] = []
+        #: bodies received by POST /videos/{id}/telegram
+        self.telegram_links: list[dict[str, Any]] = []
         self.status_script: list[str] = list(DEFAULT_STATUS_SCRIPT)
         self.transcript_content: str = "Hello world. This is a short transcript."
         self.transcript_language: str = "en"
@@ -184,6 +190,27 @@ class FakeBackend:
         @app.get("/api/v1/health")
         async def health() -> dict[str, Any]:
             return {"status": "ok", "db": True, "worker_alive": True}
+
+        @app.get("/api/v1/videos")
+        async def list_videos(request: Request) -> Any:
+            """One page of the library, newest first."""
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            page = int(request.query_params.get("page", 1))
+            page_size = int(request.query_params.get("page_size", 20))
+            items = [
+                {k: v for k, v in video.items() if k not in {"script_index", "status_script"}}
+                for video in self.videos.values()
+            ]
+            start = (page - 1) * page_size
+            return {
+                "items": items[start : start + page_size],
+                "total": len(items),
+                "page": page,
+                "page_size": page_size,
+            }
 
         @app.post("/api/v1/videos")
         async def create_video(request: Request) -> Any:
@@ -335,6 +362,90 @@ class FakeBackend:
             if not transcripts:
                 return self._error(404, "not_found", "No transcript for this video.")
             return transcripts[0]
+
+        @app.put("/api/v1/videos/{video_id}/transcript")
+        async def save_transcript(video_id: str, request: Request) -> Any:
+            """Manual edit → a NEW version, matching the real backend."""
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            video = self.videos.get(video_id)
+            if video is None:
+                return self._error(404, "not_found", f"No video {video_id}.")
+            body = await request.json()
+            transcripts = video.setdefault("transcripts", [])
+            version = max((t.get("version", 0) for t in transcripts), default=0) + 1
+            transcript = {
+                "id": f"tr-{video_id}-v{version}",
+                "video_id": video_id,
+                "version": version,
+                "source": "manual",
+                "language": body.get("language"),
+                "content": body.get("content", ""),
+                "segments": body.get("segments"),
+                "status": "ready",
+                "cleaned": body.get("cleaned", True),
+                "error": None,
+                "created_by": request.headers.get("X-Requested-By", "system"),
+                "created_at": "2026-10-28T00:00:00Z",
+                "updated_at": "2026-10-28T00:00:00Z",
+            }
+            transcripts.insert(0, transcript)
+            self.saved_transcripts.append(transcript)
+            return JSONResponse(transcript, status_code=201)
+
+        @app.post("/api/v1/videos/{video_id}/tvna")
+        async def record_tvna(video_id: str, request: Request) -> Any:
+            """Allocate PP-NNN the first time, keep it on a re-record."""
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            video = self.videos.get(video_id)
+            if video is None:
+                return self._error(404, "not_found", f"No video {video_id}.")
+            body = await request.json()
+            if not body.get("location_tag"):
+                return self._error(422, "validation_failed", "location_tag is required.")
+            if video.get("tvna_serial") is None:
+                video["tvna_serial"] = len(
+                    [v for v in self.videos.values() if v.get("tvna_serial")]
+                ) + 1
+            serial = video["tvna_serial"]
+            video.update(
+                {
+                    "tvna_serial": serial,
+                    "tvna_id": f"PP-{serial:03d}",
+                    "location_tag": body["location_tag"],
+                    "source_type": body.get("source_type", "Video"),
+                    "collection_method": body.get("collection_method", "Manual browse"),
+                    "collected_by": body.get("collected_by") or "system",
+                    "collection_date": body.get("collection_date") or "2026-10-28",
+                    "notes": body.get("notes", video.get("notes")),
+                }
+            )
+            for key in ("author_handle", "date_posted", "caption"):
+                if body.get(key):
+                    video[key] = body[key]
+            self.tvna_records.append(dict(video))
+            return JSONResponse(video)
+
+        @app.post("/api/v1/videos/{video_id}/telegram")
+        async def link_telegram(video_id: str, request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            video = self.videos.get(video_id)
+            if video is None:
+                return self._error(404, "not_found", f"No video {video_id}.")
+            body = await request.json()
+            video["telegram_file_id"] = body.get("file_id")
+            if body.get("message_id") is not None:
+                video["telegram_message_id"] = body["message_id"]
+            self.telegram_links.append(dict(body))
+            return JSONResponse(video)
 
         @app.post("/api/v1/videos/{video_id}/transcript/generate")
         async def generate_transcript(video_id: str, request: Request) -> Any:

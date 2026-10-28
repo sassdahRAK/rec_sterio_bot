@@ -17,16 +17,64 @@ code and never touches the database.
 | `/status <video_id>` | anyone | Status, progress %, file size, duration, transcript availability, media link. |
 | `/transcript <video_id>` | anyone | Current transcript — inline text when short, a `.txt` document when long. Includes the version number. |
 | `/transcripts <video_id>` | anyone | Every transcript version, newest first. |
+| `/edit <video_id> [text]` | anyone | **Edit the transcript from the chat.** With text, saves immediately; without, opens a draft and the next plain message becomes the new version. The previous version is always kept. |
+| `/cancel` | anyone | Abandon a pending transcript edit. |
+| `/collect` | anyone | **Guided TvNa record wizard** (instruction schema): paste the link → location tag → collection method → notes. Assigns the next `PP-NNN` and prints the full record back. |
+| `/record <video_id>` | anyone | Show one item's TvNa record in the platform's field order. |
+| `/records` | anyone | The most recent TvNa records. |
 | `/merge <video_id> [model]` | anyone | Feature 4 — queue a Whisper×Gemini merge. If no Gemini transcript exists yet it enqueues one and starts the merge automatically when it lands. Reports the diff with per-segment provenance when ready. |
 | `/merges <video_id>` | anyone | Merge history; ready merges get an **Apply** button. |
 | `/apply <merge_id>` | anyone | Promote a ready merge to the current transcript (creates a new version, never overwrites). |
-| `/media <video_id>` | anyone | Uploads the downloaded file to the chat (the media route is authenticated, so a raw URL would 401 in a browser). |
+| `/media <video_id>` | anyone | Uploads the downloaded file to the chat (the media route is authenticated, so a raw URL would 401 in a browser). The returned Telegram `file_id` is recorded against the video, so a clip under the Bot API's 20 MB `getFile` ceiling can be fetched back later. |
 | `/jobs [failed\|queued\|running\|succeeded]` | admin | Recent jobs and their errors. |
 | `/retry <video_id>` | admin | `POST /videos/{id}/retry` — re-enqueue a download. |
 | `/jobretry <job_id>` | admin | `POST /jobs/{id}/retry` — reset a failed/dead job. |
 
 Admins are the Telegram user ids listed in `ADMIN_TELEGRAM_IDS`. A non-admin
 gets a "not authorised" message and **no backend request is made**.
+
+## TvNa collection schema
+
+`/collect` fills the schema the TvNa platform requires. Only two fields need a
+human; the rest are taken from the download metadata or defaulted:
+
+| Field | Source |
+|---|---|
+| `ID` (`PP-001`) | Allocated by the backend, under a lock, on first record. Re-recording keeps the number. |
+| `Platform` | Auto-detected from the URL. |
+| `Source Type` | Default `Video`; the wizard keeps it unless changed. |
+| `Author/Handle` | yt-dlp `uploader_id` / `uploader`, prefixed with `@`. |
+| `Date Posted` | yt-dlp `upload_date`, normalised to `YYYY-MM-DD` (or `n.d.`). |
+| `Caption` | First 20 words of the description, verbatim. |
+| `URL` | The `source_url` the collector pasted. |
+| `Location Tag` | **Asked in the wizard** — the only required field. |
+| `Collection Method` | **Asked in the wizard**: `Manual browse` or `Research API`. |
+| `Collected By` | The Telegram display name. |
+| `Collection Date` | UTC date the record was saved. |
+| `Notes` | **Asked in the wizard** (optional; `-` to skip). |
+
+## Telegram storage (instruction #4)
+
+The instruction asked for the video to live in Telegram via *Telegram Drive* and
+be linked from the database. Telegram Drive is a Tauri/Rust **desktop app** with
+MTProto user login, so it cannot run inside this bot — and the Bot API caps
+`getFile` downloads at **20 MB**, so Telegram cannot be primary storage for the
+media anyway.
+
+What is implemented instead: after `/media` uploads a file, the bot records the
+returned `telegram_file_id` and `telegram_message_id` against the video. That
+makes a clip under the 20 MB ceiling re-fetchable, and leaves a pointer in the
+catalogue for anything larger. Local disk stays authoritative.
+
+## Scraping TikTok and Facebook (instruction #5)
+
+Both platforms are handled by **yt-dlp**, already a dependency — no separate
+scraper repo is vendored. A block now produces an actionable error instead of a
+generic failure: the bot tells the operator to supply `YTDLP_COOKIES_FILE`
+(and, for TikTok, `YTDLP_IMPERSONATE`) rather than silently retrying.
+
+Rate limits are treated as *transient* (the job retries with backoff); a bot
+check is treated as *permanent* (the job fails with the remedy in the message).
 
 ## Install
 

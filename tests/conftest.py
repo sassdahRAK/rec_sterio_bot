@@ -83,9 +83,12 @@ class FakeContext:
         args: list[str] | None = None,
         bot_data: dict[str, Any] | None = None,
         bot: FakeBot | None = None,
+        user_data: dict[str, Any] | None = None,
     ) -> None:
         self.args = args or []
         self.bot_data = bot_data if bot_data is not None else {}
+        # Per-Telegram-user scratch space, as python-telegram-bot provides.
+        self.user_data = user_data if user_data is not None else {}
         self.bot = bot or FakeBot()
         self.error: BaseException | None = None
 

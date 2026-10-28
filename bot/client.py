@@ -278,6 +278,12 @@ class ApiClient:
     async def get_video(self, video_id: str, *, requested_by: str | None = None) -> dict[str, Any]:
         return await self.request("GET", f"/videos/{video_id}", requested_by=requested_by)
 
+    async def list_videos(
+        self, params: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """One page of the video library (`{items, total, page, page_size}`)."""
+        return await self.request("GET", "/videos", params=params)
+
     async def delete_video(self, video_id: str) -> None:
         await self.request("DELETE", f"/videos/{video_id}", expect_json=False)
 
@@ -294,6 +300,83 @@ class ApiClient:
 
     async def get_transcript_segments(self, video_id: str) -> dict[str, Any]:
         return await self.request("GET", f"/videos/{video_id}/transcript/segments")
+
+    async def save_transcript(
+        self,
+        video_id: str,
+        content: str,
+        *,
+        segments: Any = None,
+        language: str | None = None,
+        cleaned: bool = True,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Save a manual correction as a NEW transcript version (instruction.txt #3).
+
+        The backend never mutates history: this creates v(n+1) and leaves the
+        ASR output retrievable. A manual edit is a human correction, so the new
+        version is marked cleaned by default (#8).
+        """
+        body: dict[str, Any] = {"content": content, "cleaned": cleaned}
+        if segments is not None:
+            body["segments"] = segments
+        if language:
+            body["language"] = language
+        return await self.request(
+            "PUT",
+            f"/videos/{video_id}/transcript",
+            json=body,
+            requested_by=requested_by,
+        )
+
+    async def record_tvna(
+        self,
+        video_id: str,
+        *,
+        location_tag: str,
+        source_type: str = "Video",
+        collection_method: str = "Manual browse",
+        author_handle: str | None = None,
+        date_posted: str | None = None,
+        caption: str | None = None,
+        collected_by: str | None = None,
+        notes: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Attach the TvNa collection record (instruction.txt #6)."""
+        body: dict[str, Any] = {
+            "location_tag": location_tag,
+            "source_type": source_type,
+            "collection_method": collection_method,
+        }
+        for key, value in (
+            ("author_handle", author_handle),
+            ("date_posted", date_posted),
+            ("caption", caption),
+            ("collected_by", collected_by),
+            ("notes", notes),
+        ):
+            if value:
+                body[key] = value
+        return await self.request(
+            "POST", f"/videos/{video_id}/tvna", json=body, requested_by=requested_by
+        )
+
+    async def link_telegram(
+        self,
+        video_id: str,
+        file_id: str,
+        *,
+        message_id: int | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the Telegram copy of a video (instruction.txt #4)."""
+        body: dict[str, Any] = {"file_id": file_id}
+        if message_id is not None:
+            body["message_id"] = message_id
+        return await self.request(
+            "POST", f"/videos/{video_id}/telegram", json=body, requested_by=requested_by
+        )
 
     async def generate_transcript(
         self,

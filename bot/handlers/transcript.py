@@ -16,9 +16,27 @@ from ..keyboards import transcript_versions_keyboard
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["transcript_command", "transcripts_command"]
+__all__ = [
+    "PENDING_EDIT_KEY",
+    "cancel_command",
+    "handle_pending_edit",
+    "transcript_command",
+    "transcripts_command",
+    "edit_command",
+]
 
 USAGE = "Usage: /transcript <video id>  (the id shown when you queued the link)"
+
+# Where a half-finished edit lives. `context.user_data` is per-Telegram-user,
+# so two people editing two different videos never see each other's draft.
+PENDING_EDIT_KEY = "pending_edit_video_id"
+
+EDIT_USAGE = (
+    "Usage:\n"
+    "`/edit <video id>` — send the corrected text in your next message\n"
+    "`/edit <video id> <new text>` — save in one go\n"
+    "`/cancel` — abandon a draft"
+)
 
 
 def _limit(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -172,3 +190,153 @@ def _items(payload: Any) -> list[Any]:
         if isinstance(items, list):
             return items
     return []
+
+
+# ------------------------------------------------------------------ editing
+
+
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Correct a transcript from the chat (instruction.txt #3).
+
+    Two shapes: ``/edit <id> <text>`` saves immediately, and ``/edit <id>``
+    opens a draft — the next plain message from that user is the new text.
+    Either way the backend stores a NEW version, so the ASR output survives.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    args = list(context.args or [])
+    if not args:
+        await message.reply_text(EDIT_USAGE, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    video_id = args[0].strip()
+    if not is_uuid(video_id):
+        await message.reply_text(
+            f"`{video_id}` is not a valid video id.\n{EDIT_USAGE}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    inline_text = " ".join(a for a in args[1:] if a).strip()
+    if inline_text:
+        await _save_edit(message, context, video_id, inline_text)
+        return
+
+    try:
+        client = get_client(context)
+    except RuntimeError as exc:
+        await message.reply_text(f"[bot not ready] {exc}")
+        return
+
+    try:
+        transcript = await client.get_transcript(video_id)
+    except ApiError as exc:
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
+        return
+    except ApiNetworkError as exc:
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    current = str((transcript or {}).get("content") or "")
+    version = (transcript or {}).get("version", "?")
+    if not current.strip():
+        await message.reply_text(
+            f"Video `{video_id}` has no transcript text to edit yet. "
+            f"Check `/status {video_id}`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Stash the draft target so the next message from this user is the edit.
+    user_data = context.user_data
+    if user_data is not None:
+        user_data[PENDING_EDIT_KEY] = video_id
+
+    preview = current if len(current) <= 1500 else current[:1500] + "\n…(truncated)"
+    await message.reply_text(
+        f"*Editing v{version} of* `{video_id}`\n\n"
+        f"{escape_markdown(preview)}\n\n"
+        "Send the corrected transcript as your next message. "
+        "`/cancel` abandons the draft.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def handle_pending_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Consume a plain message as the body of a pending edit.
+
+    Returns True when the message was an edit, so the caller can stop — the
+    same message must not also be treated as a link to download.
+    """
+    user_data = context.user_data
+    if not user_data:
+        return False
+    video_id = user_data.get(PENDING_EDIT_KEY)
+    if not video_id:
+        return False
+    message = update.effective_message
+    if message is None or not message.text:
+        return False
+
+    text = message.text
+    if text.startswith("/"):
+        # A command is not the edit body — leave the draft open so the user can
+        # still use /cancel or /status without losing what they were doing.
+        return False
+
+    del user_data[PENDING_EDIT_KEY]
+    await _save_edit(message, context, str(video_id), text)
+    return True
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Abandon a pending transcript edit."""
+    message = update.effective_message
+    user_data = context.user_data
+    had = bool(user_data and user_data.pop(PENDING_EDIT_KEY, None))
+    if message is None:
+        return
+    await message.reply_text("Edit cancelled." if had else "Nothing to cancel.")
+
+
+async def _save_edit(
+    message: Any, context: ContextTypes.DEFAULT_TYPE, video_id: str, text: str
+) -> None:
+    """Save `text` as a new transcript version and report the new version."""
+    if not text.strip():
+        await message.reply_text("The corrected transcript is empty — nothing saved.")
+        return
+
+    try:
+        client = get_client(context)
+    except RuntimeError as exc:
+        await message.reply_text(f"[bot not ready] {exc}")
+        return
+
+    try:
+        saved = await client.save_transcript(
+            video_id,
+            text,
+            requested_by=actor_for_from_message(message),
+        )
+    except ApiError as exc:
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
+        return
+    except ApiNetworkError as exc:
+        await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    version = (saved or {}).get("version", "?")
+    await message.reply_text(
+        f"Saved as *v{version}* for `{video_id}` — the previous version is still "
+        "available via `/transcripts`.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+def actor_for_from_message(message: Any) -> str | None:
+    """`telegram:<id>` for the user who sent `message`."""
+    user = getattr(message, "from_user", None)
+    uid = getattr(user, "id", None)
+    return f"telegram:{uid}" if uid is not None else None

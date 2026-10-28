@@ -137,7 +137,7 @@ async def deliver_media(
 
     filename = _filename(video, video_id) if isinstance(video, Mapping) else f"{video_id}.mp4"
     try:
-        await bot.send_document(
+        sent = await bot.send_document(
             chat_id=chat_id,
             document=payload,
             filename=filename,
@@ -151,6 +151,22 @@ async def deliver_media(
             text=f"Could not upload the file: {exc}",
         )
         return False
+
+    # instruction.txt #4: link the Telegram copy back to the catalogue. Only a
+    # file under the Bot API's 20 MB `getFile` ceiling can actually be pulled
+    # back, so the hint says so rather than implying the bytes are mirrored.
+    document = getattr(sent, "document", None)
+    file_id = getattr(document, "file_id", None)
+    if file_id:
+        try:
+            await client.link_telegram(
+                video_id, file_id, message_id=getattr(sent, "message_id", None)
+            )
+        except (ApiError, ApiNetworkError) as exc:
+            # Recording the reference is a convenience; the delivery already
+            # succeeded, so never turn this into a user-visible failure.
+            logger.info("could not record telegram copy for %s: %s", video_id, exc)
+
     return True
 
 
