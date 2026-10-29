@@ -209,7 +209,15 @@ class BrokenMediaWatchClient:
             "transcripts": [],
         }
 
-    async def get_media(self, video_id: str) -> bytes:
+    async def get_media(self, video_id: str, variant: str | None = None) -> bytes:
+        from bot.client import ApiError
+
+        raise ApiError("not_found", "Media is not available yet.", status_code=404)
+
+    async def download_media_to(
+        self, video_id: str, path: str, *, max_bytes: int, **kwargs
+    ) -> int:
+        """The streamed fetch of an undownloaded video hits the same 404."""
         from bot.client import ApiError
 
         raise ApiError("not_found", "Media is not available yet.", status_code=404)

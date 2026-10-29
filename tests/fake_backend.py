@@ -35,6 +35,17 @@ class FakeBackend:
         #: body returned by GET /folders/{id}/download; tests enlarge it to
         #: exercise the "too big for Telegram" fallback.
         self.zip_bytes = b"PK\x03\x04fake-zip-for-tests"
+        #: body returned by GET /videos/{id}/media *without* a variant, when
+        #: None (the default) the fixed "fake-media-bytes" body is served.
+        self.media_bytes: bytes | None = None
+        #: compressed-variant artifacts (video id → bytes), mirroring the real
+        #: endpoint: configured → the artifact streams back; absent → the 404
+        #: ``compressed_not_ready`` envelope, and a compress job (idempotently)
+        #: enqueued just like the real backend does.
+        self.compressed_media: dict[str, bytes] = {}
+        #: when set, variant=compressed answers with this (status, code,
+        #: message) instead — scriptable path for "any other failure".
+        self.compressed_failure: tuple[int, str, str] | None = None
         #: statuses a newly created merge walks through, one per GET /merges/{id}
         self.merge_status_script: list[str] = ["ready"]
         self.requests: list[dict[str, Any]] = []
@@ -98,6 +109,7 @@ class FakeBackend:
             {
                 "method": request.method,
                 "path": request.url.path,
+                "params": dict(request.query_params),
                 "requested_by": request.headers.get("x-requested-by"),
                 "authorization": request.headers.get("authorization"),
             }
@@ -430,10 +442,52 @@ class FakeBackend:
             unauth = self._auth(request)
             if unauth is not None:
                 return unauth
+            variant = request.query_params.get("variant")
+            if variant == "compressed":
+                # Mirror the real C1 endpoint: the artifact streams back when
+                # it exists; while absent the 404 compressed_not_ready envelope
+                # is answered and a compress job (idempotently) enqueued.
+                if self.compressed_failure is not None:
+                    status, code, message = self.compressed_failure
+                    return self._error(status, code, message)
+                artifact = self.compressed_media.get(video_id)
+                if artifact is None:
+                    if not any(
+                        j["kind"] == "compress" and j["video_id"] == video_id
+                        for j in self.jobs.values()
+                    ):
+                        job = {
+                            "id": str(uuid.uuid4()),
+                            "kind": "compress",
+                            "video_id": video_id,
+                            "status": "queued",
+                            "payload": {"variant": "compressed"},
+                            "attempts": 0,
+                            "max_attempts": 3,
+                            "priority": 0,
+                            "last_error": None,
+                            "scheduled_at": "2026-01-01T00:00:00Z",
+                            "created_at": "2026-01-01T00:00:00Z",
+                        }
+                        self.jobs[job["id"]] = job
+                    return self._error(
+                        404,
+                        "compressed_not_ready",
+                        "The compressed copy is still being prepared.",
+                    )
+                return Response(
+                    content=artifact,
+                    media_type="video/mp4",
+                    headers={
+                        "Content-disposition": f'attachment; filename="{video_id}-compressed.mp4"'
+                    },
+                )
+            if variant:
+                return self._error(404, "not_found", f"Unknown media variant {variant}.")
             video = self.videos.get(video_id)
             if video is None or video["status"] not in {"downloaded", "transcribed"}:
                 return self._error(404, "not_found", "Media is not available yet.")
-            return PlainTextResponse("fake-media-bytes")
+            return PlainTextResponse(self.media_bytes if self.media_bytes is not None else b"fake-media-bytes")
 
         @app.get("/api/v1/videos/{video_id}/audio")
         async def get_audio(video_id: str, request: Request) -> Any:

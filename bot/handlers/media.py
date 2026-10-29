@@ -10,6 +10,7 @@ auto-delivered.
 from __future__ import annotations
 
 import logging
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,12 @@ from telegram import InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from ..client import ApiError, ApiNetworkError
+from ..client import (
+    ApiError,
+    ApiNetworkError,
+    CompressedNotReadyError,
+    OversizeMediaError,
+)
 from ..helpers import (
     BOT_NOT_READY,
     escape_markdown,
@@ -43,6 +49,17 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 # Telegram's Bot API `getFile` ceiling for bots: 20 MB. Re-sending an existing
 # copy by file_id has no limit; fetching its bytes back to the server does.
 MAX_REFETCH_BYTES = 20 * 1024 * 1024
+# The backend keeps a smaller compressed copy (h264 mp4, inside the upload
+# limit) of every unit that is over it; the media endpoint serves it on
+# `?variant=compressed` while the artifact exists.
+COMPRESSED_VARIANT = "compressed"
+# The one reply for an oversize unit whose compressed copy is still being
+# made. Kept clear of _explain_too_large's prose: that one is the final
+# "get it from the portal" answer; this is the interim "ask me again" one.
+_PREPARING_COPY_TEXT = (
+    "That clip is larger than Telegram allows. I've started preparing a smaller "
+    "copy — ask for /media again in a minute."
+)
 
 
 def _filename(video: Mapping[str, Any], video_id: str) -> str:
@@ -212,87 +229,28 @@ async def _explain_upload_failed(
         logger.warning("could not send the upload-failure notice for %s", video_id)
 
 
-async def deliver_media(
+async def _send_document_and_record(
     bot: Any,
     chat_id: int,
     client: Any,
     video_id: str,
-    video: Mapping[str, Any] | None = None,
-    *,
-    reply_markup: InlineKeyboardMarkup | None = None,
+    video: Mapping[str, Any] | None,
+    payload: bytes,
+    refetch_size: int | None,
+    reply_markup: InlineKeyboardMarkup | None,
 ) -> bool:
-    """Fetch the media through the API and upload it to the chat.
+    """Send *payload* as a document and record the copy Telegram stores.
 
-    ``reply_markup`` is the caller's web-link keyboard, shown under the file
-    once it arrives. Returns True when the file was delivered.
+    The shared tail of both delivery paths: the oversized unit's compressed
+    copy and the ordinary in-limit original arrive the same way, so the
+    caption, the ``getFile``-ceiling hint (for ``refetch_size``, the size of
+    the stored copy) and the post-send ``POST /videos/{id}/telegram`` record
+    live here. A Telegram 413 stays as the last-resort safety net for a
+    size that lied.
     """
-    if video is None:
-        try:
-            video = await client.get_video(video_id)
-        except (ApiError, ApiNetworkError):
-            video = {}
-
-    size = video.get("file_size") if isinstance(video, Mapping) else None
-    if isinstance(size, int) and size > MAX_UPLOAD_BYTES:
-        await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
-        return False
-
-    try:
-        payload = await client.get_media(video_id)
-    except ApiError as exc:
-        if exc.status_code == 404:
-            # A 404 means there is no file on disk. Say *why*: still working on
-            # it, or the download failed and here is the reason. "Not available
-            # yet" alone leaves the user with no idea what to do next. But if
-            # Telegram still holds a recorded copy of the file, the disk copy
-            # is not needed at all — re-send it first.
-            telegram_file_id = (
-                video.get("telegram_file_id") if isinstance(video, Mapping) else None
-            )
-            if telegram_file_id:
-                # A re-send by file_id happens inside Telegram's servers, so
-                # the upload limit does not apply here.
-                try:
-                    await bot.send_document(
-                        chat_id=chat_id,
-                        document=telegram_file_id,
-                        caption=f"Video `{video_id}` — re-sent from the Telegram copy",
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=reply_markup,
-                    )
-                    return True
-                except Exception as send_exc:  # noqa: BLE001 - fall back to the explanation
-                    logger.warning(
-                        "could not re-send the telegram copy for %s: %s",
-                        video_id,
-                        send_exc,
-                    )
-            await bot.send_message(
-                chat_id=chat_id,
-                text=_explain_missing_media(video, video_id),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return False
-        await bot.send_message(
-                chat_id=chat_id, text=exc.user_message(), parse_mode=ParseMode.MARKDOWN
-            )
-        return False
-    except ApiNetworkError as exc:
-        await bot.send_message(
-                chat_id=chat_id, text=exc.user_message(), parse_mode=ParseMode.MARKDOWN
-            )
-        return False
-
-    if not payload:
-        await bot.send_message(
-            chat_id=chat_id, text=f"The media for `{video_id}` is empty.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return False
-
     filename = _filename(video, video_id) if isinstance(video, Mapping) else f"{video_id}.mp4"
     caption = f"Video `{video_id}` — {format_bytes(len(payload))}"
-    if isinstance(size, int) and size > MAX_REFETCH_BYTES:
+    if isinstance(refetch_size, int) and refetch_size > MAX_REFETCH_BYTES:
         # Past Telegram's 20 MB `getFile` ceiling: the copy can be re-sent to
         # any chat, but the bot can never download those bytes back.
         caption += (
@@ -340,6 +298,183 @@ async def deliver_media(
             logger.info("could not record telegram copy for %s: %s", video_id, exc)
 
     return True
+
+
+async def _deliver_oversize(
+    bot: Any,
+    chat_id: int,
+    client: Any,
+    video_id: str,
+    video: Mapping[str, Any] | None,
+    size: int | None,
+    reply_markup: InlineKeyboardMarkup | None,
+) -> bool:
+    """Deliver a unit Telegram refuses at full size, via its compressed copy.
+
+    The original is never fetched (or, when its size was unknown, never
+    fetched *past the cap*). The compressed variant's outcomes, matching the
+    backend's endpoint contract:
+
+    - the artifact streams back → sent as a normal document, and the copy
+      Telegram stores is recorded like any other delivery;
+    - 404 ``compressed_not_ready`` → the request just (idempotently) enqueued
+      the compress job, so the reply says a smaller copy is on its way — the
+      bot does *not* poll; the user's next /media finds it ready;
+    - anything else → the portal-page explanation, unchanged text.
+    """
+    try:
+        payload = await client.get_media(video_id, variant=COMPRESSED_VARIANT)
+    except CompressedNotReadyError:
+        await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
+        return False
+    except (ApiError, ApiNetworkError) as exc:
+        if getattr(exc, "status_code", None) == 404 and getattr(exc, "code", None) == (
+            "compressed_not_ready"
+        ):
+            # A stub/older client may raise the plain error; same answer.
+            await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
+            return False
+        logger.warning("compressed copy for %s is not available: %s", video_id, exc)
+        await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+        return False
+
+    if not payload:
+        await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+        return False
+
+    # The artifact's own size is what decides its copy's refetchability.
+    return await _send_document_and_record(
+        bot, chat_id, client, video_id, video, payload, len(payload), reply_markup
+    )
+
+
+async def _stream_original(client: Any, video_id: str) -> bytes | None:
+    """Fetch an unknown-size original without ever holding it all in RAM.
+
+    ``file_size`` is not always recorded, and the bot used to pull the whole
+    body into memory before Telegram's 413 revealed it was oversize. Instead
+    the media stream is written to a temp file, capped at the upload limit:
+    a unit past it is abandoned mid-body (None returned — the caller then
+    tries the compressed copy), and anything the cap allowed is small enough
+    to send. Telegram's 413 stays as the safety net for a size that lied.
+    """
+    with tempfile.NamedTemporaryFile(prefix="recsterio-", suffix=".part") as tmp:
+        try:
+            written = await client.download_media_to(
+                video_id, tmp.name, max_bytes=MAX_UPLOAD_BYTES
+            )
+        except OversizeMediaError:
+            return None
+        logger.info("streamed %s bytes of %s to a temp file", written, video_id)
+        tmp.seek(0)
+        return tmp.read()
+
+
+async def deliver_media(
+    bot: Any,
+    chat_id: int,
+    client: Any,
+    video_id: str,
+    video: Mapping[str, Any] | None = None,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Fetch the media through the API and upload it to the chat.
+
+    ``reply_markup`` is the caller's web-link keyboard, shown under the file
+    once it arrives. Returns True when the file was delivered. Still always a
+    document upload — a unit over Telegram's 50 MB limit arrives through the
+    backend's compressed copy (``variant=compressed``) when that exists, and
+    a unit with no recorded size is *streamed* to a temp file so an oversize
+    body is discovered and abandoned without landing whole in RAM.
+    """
+    if video is None:
+        try:
+            video = await client.get_video(video_id)
+        except (ApiError, ApiNetworkError):
+            video = {}
+
+    size = video.get("file_size") if isinstance(video, Mapping) else None
+    if isinstance(size, int) and size > MAX_UPLOAD_BYTES:
+        # Telegram cannot carry the original at all — try the compressed copy.
+        return await _deliver_oversize(
+            bot, chat_id, client, video_id, video, size, reply_markup
+        )
+
+    payload: bytes | None
+    try:
+        if isinstance(size, int):
+            # The recorded size is inside the limit — the original is safe to
+            # fetch whole and send, as before.
+            payload = await client.get_media(video_id)
+        else:
+            # `file_size` was never recorded — fetch by streaming instead of
+            # trusting the request: an oversize body is abandoned past the
+            # upload cap and the compressed copy is tried, so RAM (and the
+            # wire) only ever carry what could actually be sent.
+            payload = await _stream_original(client, video_id)
+    except ApiError as exc:
+        if exc.status_code == 404:
+            # A 404 means there is no file on disk. Say *why*: still working on
+            # it, or the download failed and here is the reason. "Not available
+            # yet" alone leaves the user with no idea what to do next. But if
+            # Telegram still holds a recorded copy of the file, the disk copy
+            # is not needed at all — re-send it first.
+            telegram_file_id = (
+                video.get("telegram_file_id") if isinstance(video, Mapping) else None
+            )
+            if telegram_file_id:
+                # A re-send by file_id happens inside Telegram's servers, so
+                # the upload limit does not apply here.
+                try:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=telegram_file_id,
+                        caption=f"Video `{video_id}` — re-sent from the Telegram copy",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=reply_markup,
+                    )
+                    return True
+                except Exception as send_exc:  # noqa: BLE001 - fall back to the explanation
+                    logger.warning(
+                        "could not re-send the telegram copy for %s: %s",
+                        video_id,
+                        send_exc,
+                    )
+            await bot.send_message(
+                chat_id=chat_id,
+                text=_explain_missing_media(video, video_id),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return False
+        await bot.send_message(
+                chat_id=chat_id, text=exc.user_message(), parse_mode=ParseMode.MARKDOWN
+            )
+        return False
+    except ApiNetworkError as exc:
+        await bot.send_message(
+                chat_id=chat_id, text=exc.user_message(), parse_mode=ParseMode.MARKDOWN
+            )
+        return False
+
+    if payload is None:
+        # The streamed original reached past the upload cap and was abandoned:
+        # what arrived cannot be sent, and the rest was never pulled. The same
+        # compressed-copy attempt an oversize `file_size` gets.
+        return await _deliver_oversize(
+            bot, chat_id, client, video_id, video, None, reply_markup
+        )
+
+    if not payload:
+        await bot.send_message(
+            chat_id=chat_id, text=f"The media for `{video_id}` is empty.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return False
+
+    return await _send_document_and_record(
+        bot, chat_id, client, video_id, video, payload, size, reply_markup
+    )
 
 
 async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

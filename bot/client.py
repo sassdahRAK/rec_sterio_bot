@@ -25,6 +25,8 @@ __all__ = [
     "ApiClient",
     "ApiError",
     "ApiNetworkError",
+    "CompressedNotReadyError",
+    "OversizeMediaError",
     "escape_markdown",
 ]
 
@@ -76,6 +78,32 @@ class ApiNetworkError(Exception):
             "[network_error] Could not reach the recsterio backend. "
             "Please try again in a moment."
         )
+
+
+class CompressedNotReadyError(ApiError):
+    """The compressed copy of an oversize video is not on disk yet.
+
+    ``GET /videos/{id}/media?variant=compressed`` answers 404 with the
+    ``compressed_not_ready`` envelope while the compress job still runs —
+    and that request side-effect (idempotently) enqueues the job, so a
+    later media request finds the artifact. Raised as its own type — while
+    remaining an :class:`ApiError` every handler already understands — so
+    the delivery chain can reply without string-matching the code.
+    """
+
+
+class OversizeMediaError(Exception):
+    """A media stream passed ``max_bytes`` and was abandoned mid-body.
+
+    Only :meth:`download_media_to` raises it; ``size_seen`` is the byte
+    count reached when the cap was crossed — the stream is then closed, so
+    the caller knows the unit is oversize without ever having held more
+    than *max_bytes* in hand.
+    """
+
+    def __init__(self, size_seen: int) -> None:
+        super().__init__(f"media passed the {size_seen}-byte cap while streaming")
+        self.size_seen = size_seen
 
 
 def _sleep(seconds: float) -> Awaitable[None]:
@@ -453,9 +481,75 @@ class ApiClient:
     async def retry_job(self, job_id: str, *, requested_by: str | None = None) -> dict[str, Any]:
         return await self.request("POST", f"/jobs/{job_id}/retry", requested_by=requested_by)
 
-    async def get_media(self, video_id: str) -> bytes:
-        response = await self.request("GET", f"/videos/{video_id}/media", expect_json=False)
+    async def get_media(self, video_id: str, *, variant: str | None = None) -> bytes:
+        """The video's bytes; ``variant="compressed"`` asks for the smaller copy.
+
+        The oversized original cannot be uploaded to Telegram, so the backend
+        keeps a compressed artifact (h264 mp4, inside the bot's 50 MB ceiling)
+        for units past the limit. While that artifact is still being produced
+        the endpoint answers 404 ``compressed_not_ready`` — surfaced here as
+        :class:`CompressedNotReadyError` instead of a plain :class:`ApiError`.
+        """
+        params = {"variant": variant} if variant else None
+        try:
+            response = await self.request(
+                "GET", f"/videos/{video_id}/media", params=params, expect_json=False
+            )
+        except ApiError as exc:
+            if exc.status_code == 404 and exc.code == "compressed_not_ready":
+                raise CompressedNotReadyError(
+                    exc.code, exc.message, exc.details, exc.status_code
+                ) from exc
+            raise
         return response.content
+
+    async def download_media_to(
+        self,
+        video_id: str,
+        path: str,
+        *,
+        max_bytes: int,
+        requested_by: str | None = None,
+    ) -> int:
+        """Stream ``GET /videos/{id}/media`` to *path* without buffering it whole.
+
+        For units whose recorded ``file_size`` is missing, the whole body used
+        to be pulled into memory before Telegram's 413 revealed it was oversize;
+        streaming with a cap decides by the actual size instead. Written bytes
+        are returned on success. When the body passes *max_bytes* without
+        ending, the stream is abandoned and :class:`OversizeMediaError` is
+        raised. Errors follow the other endpoints (:class:`ApiError` with the
+        contract's envelope code, :class:`ApiNetworkError` when unreachable);
+        the transfer itself is not retried — a half-written file cannot be.
+        """
+        request = self._client.build_request(
+            "GET",
+            self.media_url(video_id),
+            headers=self._headers(requested_by),
+        )
+        try:
+            response = await self._client.send(request, stream=True)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise ApiNetworkError(str(exc) or type(exc).__name__, exc) from exc
+        try:
+            if response.status_code >= 400:
+                await response.aread()
+                raise self._to_api_error(response)
+            written = 0
+            # The stream must land on disk; the per-chunk writes are tiny and
+            # unbuffered, so the blocking `open` never stalls the loop long
+            # (pragma below silences ASYNC230).
+            with open(path, "wb", buffering=0) as tmp:  # noqa: ASYNC230
+                async for chunk in response.aiter_bytes():
+                    tmp.write(chunk)
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise OversizeMediaError(written)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise ApiNetworkError(str(exc) or type(exc).__name__, exc) from exc
+        finally:
+            await response.aclose()
+        return written
 
     async def get_audio(
         self,
