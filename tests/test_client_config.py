@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import httpx
 import pytest
 
 from bot.__main__ import build_application
-from bot.client import ApiClient, ApiError, ApiNetworkError
+from bot.client import (
+    ApiClient,
+    ApiError,
+    ApiNetworkError,
+    CompressedNotReadyError,
+)
 from bot.config import Settings
 
 
@@ -77,6 +84,49 @@ async def test_duplicate_video_returns_the_existing_video(api_client, backend):
 
 async def test_media_url_is_built_from_the_base_url(api_client):
     assert api_client.media_url("abc") == "http://testserver/api/v1/videos/abc/media"
+
+
+async def _downloaded_video(api_client, slug: str) -> str:
+    """Create a video and walk it to the 'downloaded' state."""
+    video = await api_client.create_video(f"https://youtu.be/{slug}")
+    for _ in range(4):
+        await api_client.get_video(video["id"])
+    return video["id"]
+
+
+async def test_download_media_to_carries_the_variant_query(api_client, backend):
+    """variant=compressed reaches the wire as a query parameter of the streamed
+    GET — the same request get_media makes, just without the buffer."""
+    video_id = await _downloaded_video(api_client, "stream-variant")
+    backend.compressed_media[video_id] = b"compressed-bytes"
+
+    with tempfile.NamedTemporaryFile() as tmp:
+        written = await api_client.download_media_to(
+            video_id, tmp.name, max_bytes=1024, variant="compressed"
+        )
+
+    assert written == len(b"compressed-bytes")
+    media_requests = [
+        r for r in backend.requests if r["path"] == f"/api/v1/videos/{video_id}/media"
+    ]
+    assert media_requests, "the stream must hit the media endpoint"
+    assert media_requests[-1]["params"] == {"variant": "compressed"}
+
+
+async def test_download_media_to_maps_a_missing_artifact_to_the_typed_error(
+    api_client, backend
+):
+    """A 404 compressed_not_ready becomes CompressedNotReadyError on the
+    streaming method too, so both media reads share one error vocabulary."""
+    video_id = await _downloaded_video(api_client, "stream-not-ready")
+
+    with (
+        tempfile.NamedTemporaryFile() as tmp,
+        pytest.raises(CompressedNotReadyError),
+    ):
+        await api_client.download_media_to(
+            video_id, tmp.name, max_bytes=1024, variant="compressed"
+        )
 
 
 # --- config ---------------------------------------------------------------

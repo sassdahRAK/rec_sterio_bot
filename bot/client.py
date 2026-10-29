@@ -509,22 +509,33 @@ class ApiClient:
         path: str,
         *,
         max_bytes: int,
+        variant: str | None = None,
         requested_by: str | None = None,
     ) -> int:
         """Stream ``GET /videos/{id}/media`` to *path* without buffering it whole.
 
-        For units whose recorded ``file_size`` is missing, the whole body used
-        to be pulled into memory before Telegram's 413 revealed it was oversize;
-        streaming with a cap decides by the actual size instead. Written bytes
-        are returned on success. When the body passes *max_bytes* without
-        ending, the stream is abandoned and :class:`OversizeMediaError` is
-        raised. Errors follow the other endpoints (:class:`ApiError` with the
+        For units whose recorded ``file_size`` is missing (or whose compressed
+        copy has to be fetched), the whole body used to be pulled into memory
+        before Telegram's 413 revealed it was oversize; streaming with a cap
+        decides by the actual size instead. Written bytes are returned on
+        success. When the body passes *max_bytes* without ending, the stream is
+        abandoned and :class:`OversizeMediaError` is raised.
+
+        *variant* mirrors :meth:`get_media`: ``"compressed"`` asks for the
+        smaller copy, and a 404 ``compressed_not_ready`` becomes
+        :class:`CompressedNotReadyError` — one error vocabulary on both media
+        methods. That mapping matters most here: a backend that degrades a
+        missing artifact to the *original* would otherwise stream a
+        multi-gigabyte body, and only *max_bytes* stops it.
+
+        Other errors follow the other endpoints (:class:`ApiError` with the
         contract's envelope code, :class:`ApiNetworkError` when unreachable);
         the transfer itself is not retried — a half-written file cannot be.
         """
         request = self._client.build_request(
             "GET",
             self.media_url(video_id),
+            params={"variant": variant} if variant else None,
             headers=self._headers(requested_by),
         )
         try:
@@ -534,7 +545,14 @@ class ApiClient:
         try:
             if response.status_code >= 400:
                 await response.aread()
-                raise self._to_api_error(response)
+                error = self._to_api_error(response)
+                if error.status_code == 404 and error.code == "compressed_not_ready":
+                    # Same mapping as get_media: the compressed copy is still
+                    # being made — the request (idempotently) queued the job.
+                    raise CompressedNotReadyError(
+                        error.code, error.message, error.details, error.status_code
+                    ) from error
+                raise error
             written = 0
             # The stream must land on disk; the per-chunk writes are tiny and
             # unbuffered, so the blocking `open` never stalls the loop long

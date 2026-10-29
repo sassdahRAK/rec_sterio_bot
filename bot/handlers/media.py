@@ -312,35 +312,75 @@ async def _deliver_oversize(
     """Deliver a unit Telegram refuses at full size, via its compressed copy.
 
     The original is never fetched (or, when its size was unknown, never
-    fetched *past the cap*). The compressed variant's outcomes, matching the
-    backend's endpoint contract:
+    fetched *past the cap*). The compressed variant is *streamed* to a temp
+    file under the upload cap rather than buffered whole: the backend may
+    degrade a missing artifact to the original, so only the byte cap stands
+    between a multi-gigabyte unit and the bot's RAM. Outcomes, matching the
+    endpoint contract:
 
-    - the artifact streams back → sent as a normal document, and the copy
-      Telegram stores is recorded like any other delivery;
+    - the artifact streams back inside the cap → read back and sent as a
+      normal document, and the copy Telegram stores is recorded like any
+      other delivery;
     - 404 ``compressed_not_ready`` → the request just (idempotently) enqueued
       the compress job, so the reply says a smaller copy is on its way — the
       bot does *not* poll; the user's next /media finds it ready;
-    - anything else → the portal-page explanation, unchanged text.
+    - the body passes the cap (the degraded original) → abandoned mid-stream,
+      so Telegram's 413 never sees it and RAM never holds it; the reply is the
+      portal-page explanation;
+    - any other API/network error → the same portal-page explanation.
     """
-    try:
-        payload = await client.get_media(video_id, variant=COMPRESSED_VARIANT)
-    except CompressedNotReadyError:
-        await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
-        return False
-    except (ApiError, ApiNetworkError) as exc:
-        if getattr(exc, "status_code", None) == 404 and getattr(exc, "code", None) == (
-            "compressed_not_ready"
-        ):
-            # A stub/older client may raise the plain error; same answer.
+    with tempfile.NamedTemporaryFile(prefix="recsterio-", suffix=".part") as tmp:
+        try:
+            written = await client.download_media_to(
+                video_id,
+                tmp.name,
+                max_bytes=MAX_UPLOAD_BYTES,
+                variant=COMPRESSED_VARIANT,
+            )
+        except CompressedNotReadyError:
+            # The request enqueued the compress job (idempotently); the user's
+            # next /media finds it ready — no polling here.
+            logger.info(
+                "compressed copy for %s is not ready yet; told the user to retry",
+                video_id,
+            )
             await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
             return False
-        logger.warning("compressed copy for %s is not available: %s", video_id, exc)
-        await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
-        return False
+        except OversizeMediaError as exc:
+            # The backend degraded to the ORIGINAL: the read crossed the cap
+            # and only the cap kept the body out of memory.
+            logger.info(
+                "compressed variant for %s served an oversize original "
+                "(%s bytes seen, cap %s); not sent, pointed at the portal",
+                video_id,
+                exc.size_seen,
+                MAX_UPLOAD_BYTES,
+            )
+            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            return False
+        except (ApiError, ApiNetworkError) as exc:
+            if getattr(exc, "status_code", None) == 404 and getattr(exc, "code", None) == (
+                "compressed_not_ready"
+            ):
+                # A stub/older client may raise the plain error; same answer.
+                logger.info("compressed copy for %s is not ready yet", video_id)
+                await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
+                return False
+            logger.warning("compressed copy for %s is not available: %s", video_id, exc)
+            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            return False
 
-    if not payload:
-        await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
-        return False
+        if not written:
+            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            return False
+
+        logger.info(
+            "streamed %s bytes of the compressed copy for %s to a temp file",
+            written,
+            video_id,
+        )
+        tmp.seek(0)
+        payload = tmp.read()
 
     # The artifact's own size is what decides its copy's refetchability.
     return await _send_document_and_record(

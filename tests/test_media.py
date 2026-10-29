@@ -7,6 +7,7 @@ and uploads them to the chat.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,14 @@ class MediaClient:
         #: fake backend) the plain 404 of a missing artifact.
         self.compressed: bytes | None = None
         self.compressed_exception: Exception | None = None
+        #: when set, a streamed variant=compressed body runs past ``max_bytes``
+        #: (the backend degraded to the ORIGINAL): the byte count it reports
+        #: as seen. Set instead of ``compressed`` so a test can simulate a
+        #: multi-gigabyte body without allocating it.
+        self.compressed_oversize: int | None = None
+        #: every ``variant`` handed to download_media_to, in order (None = the
+        #: original, "compressed" = the smaller copy).
+        self.download_variants: list[str | None] = []
 
     async def get_video(self, video_id: str):
         self.video_calls += 1
@@ -129,13 +138,38 @@ class MediaClient:
         return self.payload
 
     async def download_media_to(
-        self, video_id: str, path: str, *, max_bytes: int, **kwargs: Any
+        self,
+        video_id: str,
+        path: str,
+        *,
+        max_bytes: int,
+        variant: str | None = None,
+        **kwargs: Any,
     ) -> int:
-        """Stream semantics: the payload goes to *path* unless it is oversize."""
-        if len(self.payload) > max_bytes:
-            raise OversizeMediaError(len(self.payload))
-        Path(path).write_bytes(self.payload)
-        return len(self.payload)
+        """Stream semantics, honouring the variant like the real client.
+
+        The original body goes to *path* unless it is oversize; the
+        ``compressed`` variant answers the configured artifact, the configured
+        exception, the simulated degraded original, or the plain 404.
+        """
+        self.download_variants.append(variant)
+        if variant == COMPRESSED_VARIANT:
+            if self.compressed_exception is not None:
+                raise self.compressed_exception
+            if self.compressed_oversize is not None:
+                raise OversizeMediaError(self.compressed_oversize)
+            if self.compressed is None:
+                raise ApiError(
+                    "not_found", "Media is not available yet.", status_code=404
+                )
+            body = self.compressed
+        else:
+            self.media_calls += 1
+            body = self.payload
+        if len(body) > max_bytes:
+            raise OversizeMediaError(len(body))
+        Path(path).write_bytes(body)
+        return len(body)
 
     async def link_telegram(self, video_id: str, file_id: str, **kwargs: Any) -> None:
         """The record step after a successful send (POST /videos/{id}/telegram)."""
@@ -729,7 +763,12 @@ async def test_an_oversize_unit_against_a_variantless_client_gets_the_portal_exp
     delivered = await deliver_media(bot, 42, client, "vid-old-backend")
 
     assert delivered is False
-    assert client.compressed_calls == 1
+    assert client.download_variants == [COMPRESSED_VARIANT], (
+        "the variant must be attempted through the capped stream"
+    )
+    assert client.compressed_calls == 0, (
+        "the compressed copy must never be buffered whole via get_media"
+    )
     assert client.media_calls == 0, "the oversize original must never be downloaded"
     assert "too large" in bot.sent[-1]["text"].lower()
 
@@ -747,6 +786,79 @@ async def test_an_oversize_unit_not_ready_at_the_stub_level_also_says_it_is_prep
 
     assert delivered is False
     assert "preparing a smaller copy" in bot.sent[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_an_oversize_unit_delivers_the_streamed_compressed_copy() -> None:
+    """The artifact arrives through the capped stream — not a buffered
+    get_media — and the bytes written to disk are the ones sent."""
+    bot = FakeBot()
+    client = MediaClient(payload=b"x", size=MAX_UPLOAD_BYTES + 1)
+    client.compressed = b"little-compressed-mp4"
+
+    delivered = await deliver_media(bot, 42, client, "vid-stream-compressed")
+
+    assert delivered is True
+    assert client.download_variants == [COMPRESSED_VARIANT], (
+        "the compressed copy must be fetched by the streaming method"
+    )
+    assert client.compressed_calls == 0, "the compressed fetch must not be buffered"
+    documents = [m for m in bot.sent if m.get("document") is not None]
+    assert documents and documents[0]["document"] == b"little-compressed-mp4", (
+        "the payload must be the streamed one, read back from the temp file"
+    )
+    assert client.link_calls == 1, "the delivered copy is recorded like any other"
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_oversize_original_is_abandoned_and_points_at_the_portal(
+    caplog,
+) -> None:
+    """The backend degrades variant=compressed to the ORIGINAL when no artifact
+    exists. Its bytes pass the cap: the stream is abandoned, no document is
+    uploaded, and the reply is the portal explanation — not a Telegram 413."""
+    video_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    bot = FakeBot()
+    client = MediaClient(payload=b"x", size=MAX_UPLOAD_BYTES + 1)
+    client.compressed_oversize = 1_700_000_000  # a 1.7 GB degraded original
+
+    with caplog.at_level(logging.INFO, logger="bot.handlers.media"):
+        delivered = await deliver_media(bot, 42, client, video_id)
+
+    assert delivered is False
+    assert client.download_variants == [COMPRESSED_VARIANT]
+    assert not any(m.get("document") is not None for m in bot.sent), (
+        "the oversize body must never be handed to Telegram"
+    )
+    notice = bot.sent[-1]
+    assert "too large" in notice["text"].lower()
+    assert f"https://portal.test/video/{video_id}" in notice["text"]
+    assert "preparing a smaller copy" not in notice["text"].lower()
+    assert any(
+        "oversize original" in record.getMessage() for record in caplog.records
+    ), "an operator can tell the degraded original from a not-ready artifact"
+
+
+@pytest.mark.asyncio
+async def test_the_streamed_compressed_404_keeps_the_preparing_text() -> None:
+    """A plain 404 ``compressed_not_ready`` envelope from the stream answers
+    the same preparing text, word for word."""
+    from bot.handlers.media import _PREPARING_COPY_TEXT
+
+    bot = FakeBot()
+    client = MediaClient(payload=b"x", size=MAX_UPLOAD_BYTES + 1)
+    client.compressed_exception = ApiError(
+        "compressed_not_ready",
+        "The compressed copy is still being prepared.",
+        status_code=404,
+    )
+
+    delivered = await deliver_media(bot, 42, client, "vid-stream-not-ready")
+
+    assert delivered is False
+    assert client.download_variants == [COMPRESSED_VARIANT]
+    assert not any(m.get("document") is not None for m in bot.sent)
+    assert bot.sent[-1]["text"] == _PREPARING_COPY_TEXT
 
 
 @pytest.mark.asyncio
