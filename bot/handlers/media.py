@@ -4,8 +4,10 @@ The media endpoint is authenticated, so a plain URL handed to the user would
 just return 401 in their browser. Instead the bot fetches the bytes through
 its own service token and uploads them to the chat.
 
-`/audio <id>` does the same for the stored mp3 — request-only, never
-auto-delivered.
+A unit over Telegram's 50 MB upload limit arrives through the backend's
+compressed delivery copy (`?variant=compressed`); when none is available the
+reply points at the portal page instead. `/audio <id>` is the same for the
+stored mp3 — request-only, never auto-delivered.
 """
 from __future__ import annotations
 
@@ -51,15 +53,10 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_REFETCH_BYTES = 20 * 1024 * 1024
 # The backend keeps a smaller compressed copy (h264 mp4, inside the upload
 # limit) of every unit that is over it; the media endpoint serves it on
-# `?variant=compressed` while the artifact exists.
+# `?variant=compressed` and marks a real copy `X-Compressed: true`. A missing
+# copy degrades to the original with `false`, so the marker — not the byte
+# count alone — decides whether the body is a delivery copy.
 COMPRESSED_VARIANT = "compressed"
-# The one reply for an oversize unit whose compressed copy is still being
-# made. Kept clear of _explain_too_large's prose: that one is the final
-# "get it from the portal" answer; this is the interim "ask me again" one.
-_PREPARING_COPY_TEXT = (
-    "That clip is larger than Telegram allows. I've started preparing a smaller "
-    "copy — ask for /media again in a minute."
-)
 
 
 def _filename(video: Mapping[str, Any], video_id: str) -> str:
@@ -144,8 +141,9 @@ async def _explain_too_large(
 ) -> None:
     """Say why the file is not coming, and put the portal page in reach.
 
-    Telegram's Bot API refuses uploads over 50 MB, so a large unit can never
-    arrive as a chat file. The portal can play and download it, so the reply
+    Telegram's Bot API refuses uploads over 50 MB, and this is the answer when
+    the backend's compressed delivery copy is missing or no smaller than the
+    original. The portal can play and download it, so the reply
     carries that page as a button **and** spells the address out in the text
     (a link stays usable in a client that does not render the button, and can
     be copied). Only when the frontend is configured at a loopback address —
@@ -238,18 +236,22 @@ async def _send_document_and_record(
     payload: bytes,
     refetch_size: int | None,
     reply_markup: InlineKeyboardMarkup | None,
+    *,
+    compressed: bool = False,
 ) -> bool:
     """Send *payload* as a document and record the copy Telegram stores.
 
     The shared tail of both delivery paths: the oversized unit's compressed
     copy and the ordinary in-limit original arrive the same way, so the
-    caption, the ``getFile``-ceiling hint (for ``refetch_size``, the size of
-    the stored copy) and the post-send ``POST /videos/{id}/telegram`` record
-    live here. A Telegram 413 stays as the last-resort safety net for a
-    size that lied.
+    caption (which names the compressed delivery copy when *compressed* is
+    set), the ``getFile``-ceiling hint (for ``refetch_size``, the size of the
+    stored copy) and the post-send ``POST /videos/{id}/telegram`` record live
+    here. A Telegram 413 stays as the last-resort safety net for a size that
+    lied.
     """
     filename = _filename(video, video_id) if isinstance(video, Mapping) else f"{video_id}.mp4"
-    caption = f"Video `{video_id}` — {format_bytes(len(payload))}"
+    kind = "compressed delivery copy, " if compressed else ""
+    caption = f"Video `{video_id}` — {kind}{format_bytes(len(payload))}"
     if isinstance(refetch_size, int) and refetch_size > MAX_REFETCH_BYTES:
         # Past Telegram's 20 MB `getFile` ceiling: the copy can be re-sent to
         # any chat, but the bot can never download those bytes back.
@@ -300,6 +302,17 @@ async def _send_document_and_record(
     return True
 
 
+async def _explain_no_media(
+    bot: Any, chat_id: int, video: Mapping[str, Any] | None, video_id: str
+) -> None:
+    """The "nothing is on disk" reply, using the video's status for the why."""
+    await bot.send_message(
+        chat_id=chat_id,
+        text=_explain_missing_media(video or {}, video_id),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 async def _deliver_oversize(
     bot: Any,
     chat_id: int,
@@ -313,38 +326,33 @@ async def _deliver_oversize(
 
     The original is never fetched (or, when its size was unknown, never
     fetched *past the cap*). The compressed variant is *streamed* to a temp
-    file under the upload cap rather than buffered whole: the backend may
-    degrade a missing artifact to the original, so only the byte cap stands
-    between a multi-gigabyte unit and the bot's RAM. Outcomes, matching the
-    endpoint contract:
+    file under the upload cap rather than buffered whole: the backend degrades
+    a missing artifact to the original, so both the byte cap and the response's
+    ``X-Compressed`` marker stand between a multi-gigabyte unit and the bot's
+    RAM (or a doomed upload). Outcomes, matching the endpoint contract:
 
-    - the artifact streams back inside the cap → read back and sent as a
-      normal document, and the copy Telegram stores is recorded like any
-      other delivery;
-    - 404 ``compressed_not_ready`` → the request just (idempotently) enqueued
-      the compress job, so the reply says a smaller copy is on its way — the
-      bot does *not* poll; the user's next /media finds it ready;
-    - the body passes the cap (the degraded original) → abandoned mid-stream,
-      so Telegram's 413 never sees it and RAM never holds it; the reply is the
-      portal-page explanation;
-    - any other API/network error → the same portal-page explanation.
+    - the artifact streams back inside the cap with ``X-Compressed: true`` →
+      read back and sent as a normal document, captioned as the compressed
+      delivery copy, and the copy Telegram stores is recorded like any other
+      delivery;
+    - the body passes the cap, or the backend degraded to the original
+      (``X-Compressed: false``) → nothing is sent; the reply is the portal-page
+      explanation, since the recorded original is past the limit anyway;
+    - 404 ``compressed_not_ready`` → a video with no media on disk at all, so
+      the usual missing-media explanation says why (downloading, failed, ...);
+    - any other API/network error → the portal-page explanation.
     """
     with tempfile.NamedTemporaryFile(prefix="recsterio-", suffix=".part") as tmp:
         try:
-            written = await client.download_media_to(
+            written, compressed = await client.stream_media_to(
                 video_id,
                 tmp.name,
                 max_bytes=MAX_UPLOAD_BYTES,
                 variant=COMPRESSED_VARIANT,
             )
         except CompressedNotReadyError:
-            # The request enqueued the compress job (idempotently); the user's
-            # next /media finds it ready — no polling here.
-            logger.info(
-                "compressed copy for %s is not ready yet; told the user to retry",
-                video_id,
-            )
-            await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
+            logger.info("no media on disk at all for %s yet", video_id)
+            await _explain_no_media(bot, chat_id, video, video_id)
             return False
         except OversizeMediaError as exc:
             # The backend degraded to the ORIGINAL: the read crossed the cap
@@ -363,14 +371,25 @@ async def _deliver_oversize(
                 "compressed_not_ready"
             ):
                 # A stub/older client may raise the plain error; same answer.
-                logger.info("compressed copy for %s is not ready yet", video_id)
-                await bot.send_message(chat_id=chat_id, text=_PREPARING_COPY_TEXT)
+                logger.info("no media on disk at all for %s yet", video_id)
+                await _explain_no_media(bot, chat_id, video, video_id)
                 return False
             logger.warning("compressed copy for %s is not available: %s", video_id, exc)
             await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
             return False
 
         if not written:
+            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            return False
+        if not compressed:
+            # X-Compressed: false — no copy exists and the backend served the
+            # original. The recorded size is past the upload cap, so sending it
+            # would only earn a Telegram 413.
+            logger.info(
+                "compressed variant for %s degraded to the original "
+                "(X-Compressed: false); not sent, pointed at the portal",
+                video_id,
+            )
             await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
             return False
 
@@ -384,7 +403,15 @@ async def _deliver_oversize(
 
     # The artifact's own size is what decides its copy's refetchability.
     return await _send_document_and_record(
-        bot, chat_id, client, video_id, video, payload, len(payload), reply_markup
+        bot,
+        chat_id,
+        client,
+        video_id,
+        video,
+        payload,
+        len(payload),
+        reply_markup,
+        compressed=True,
     )
 
 

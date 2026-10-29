@@ -94,18 +94,21 @@ async def _downloaded_video(api_client, slug: str) -> str:
     return video["id"]
 
 
-async def test_download_media_to_carries_the_variant_query(api_client, backend):
-    """variant=compressed reaches the wire as a query parameter of the streamed
-    GET — the same request get_media makes, just without the buffer."""
+async def test_stream_media_to_carries_the_variant_and_reads_x_compressed(
+    api_client, backend
+):
+    """variant=compressed reaches the wire, and the response's X-Compressed
+    marker comes back with the byte count — the artifact is a delivery copy."""
     video_id = await _downloaded_video(api_client, "stream-variant")
     backend.compressed_media[video_id] = b"compressed-bytes"
 
     with tempfile.NamedTemporaryFile() as tmp:
-        written = await api_client.download_media_to(
+        written, compressed = await api_client.stream_media_to(
             video_id, tmp.name, max_bytes=1024, variant="compressed"
         )
 
     assert written == len(b"compressed-bytes")
+    assert compressed is True
     media_requests = [
         r for r in backend.requests if r["path"] == f"/api/v1/videos/{video_id}/media"
     ]
@@ -113,18 +116,43 @@ async def test_download_media_to_carries_the_variant_query(api_client, backend):
     assert media_requests[-1]["params"] == {"variant": "compressed"}
 
 
-async def test_download_media_to_maps_a_missing_artifact_to_the_typed_error(
-    api_client, backend
-):
-    """A 404 compressed_not_ready becomes CompressedNotReadyError on the
-    streaming method too, so both media reads share one error vocabulary."""
-    video_id = await _downloaded_video(api_client, "stream-not-ready")
+async def test_get_media_with_meta_reports_a_degraded_original(api_client, backend):
+    """With no artifact the endpoint serves the original marked
+    X-Compressed: false; both media reads report that instead of pretending
+    the bytes are the smaller copy."""
+    video_id = await _downloaded_video(api_client, "media-degraded")
+
+    payload, compressed = await api_client.get_media_with_meta(
+        video_id, variant="compressed"
+    )
+    assert payload == b"fake-media-bytes"
+    assert compressed is False
+
+    with tempfile.NamedTemporaryFile() as tmp:
+        written, streamed_compressed = await api_client.stream_media_to(
+            video_id, tmp.name, max_bytes=1024, variant="compressed"
+        )
+    assert written == len(payload)
+    assert streamed_compressed is False
+
+    # get_media stays a plain-bytes wrapper for every existing caller.
+    assert await api_client.get_media(video_id) == b"fake-media-bytes"
+
+
+async def test_media_reads_map_no_media_to_the_typed_error(api_client, backend):
+    """404 compressed_not_ready means nothing is on disk at all; it becomes
+    CompressedNotReadyError on both media reads, one error vocabulary."""
+    video = await api_client.create_video("https://youtu.be/stream-not-ready")
+    video_id = video["id"]  # still queued: no media on disk
+
+    with pytest.raises(CompressedNotReadyError):
+        await api_client.get_media_with_meta(video_id, variant="compressed")
 
     with (
         tempfile.NamedTemporaryFile() as tmp,
         pytest.raises(CompressedNotReadyError),
     ):
-        await api_client.download_media_to(
+        await api_client.stream_media_to(
             video_id, tmp.name, max_bytes=1024, variant="compressed"
         )
 

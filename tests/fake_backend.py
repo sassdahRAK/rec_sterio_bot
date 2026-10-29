@@ -20,6 +20,10 @@ DEFAULT_STATUS_SCRIPT = ["pending", "downloading", "downloaded", "transcribed"]
 #: version is the 422 version_mismatch path.
 DEFAULT_CONSENT_VERSION = "2026-10-28.1"
 
+#: Mirrors the backend's COMPRESS_THRESHOLD_MB: asking for the compressed
+#: variant of a bigger original with no copy queues the compress job.
+COMPRESS_THRESHOLD_BYTES = 50 * 1024 * 1024
+
 
 class FakeBackend:
     """Mutable in-memory backend state."""
@@ -39,9 +43,11 @@ class FakeBackend:
         #: None (the default) the fixed "fake-media-bytes" body is served.
         self.media_bytes: bytes | None = None
         #: compressed-variant artifacts (video id → bytes), mirroring the real
-        #: endpoint: configured → the artifact streams back; absent → the 404
-        #: ``compressed_not_ready`` envelope, and a compress job (idempotently)
-        #: enqueued just like the real backend does.
+        #: endpoint: configured → the artifact streams back with
+        #: ``X-Compressed: true``; absent → the original is served with
+        #: ``X-Compressed: false`` and, when it is over the threshold, a
+        #: compress job is enqueued (idempotently). A video with no media at
+        #: all answers the 404 ``compressed_not_ready`` envelope.
         self.compressed_media: dict[str, bytes] = {}
         #: when set, variant=compressed answers with this (status, code,
         #: message) instead — scriptable path for "any other failure".
@@ -442,52 +448,81 @@ class FakeBackend:
             unauth = self._auth(request)
             if unauth is not None:
                 return unauth
-            variant = request.query_params.get("variant")
+            variant = request.query_params.get("variant", "original")
+            if variant not in ("original", "compressed"):
+                return self._error(
+                    422,
+                    "validation_failed",
+                    "variant must be 'original' or 'compressed'.",
+                )
+            video = self.videos.get(video_id)
+            available = video is not None and video["status"] in {
+                "downloaded",
+                "transcribed",
+            }
+            original = (
+                self.media_bytes if self.media_bytes is not None else b"fake-media-bytes"
+            )
             if variant == "compressed":
-                # Mirror the real C1 endpoint: the artifact streams back when
-                # it exists; while absent the 404 compressed_not_ready envelope
-                # is answered and a compress job (idempotently) enqueued.
+                # Mirror the real endpoint: the artifact streams back (marked
+                # X-Compressed: true) when it exists; otherwise the original is
+                # served with X-Compressed: false and, when it is over the
+                # threshold, a compress job is queued (idempotently). Only a
+                # video with nothing on disk answers 404 compressed_not_ready.
                 if self.compressed_failure is not None:
                     status, code, message = self.compressed_failure
                     return self._error(status, code, message)
                 artifact = self.compressed_media.get(video_id)
-                if artifact is None:
-                    if not any(
-                        j["kind"] == "compress" and j["video_id"] == video_id
-                        for j in self.jobs.values()
-                    ):
-                        job = {
-                            "id": str(uuid.uuid4()),
-                            "kind": "compress",
-                            "video_id": video_id,
-                            "status": "queued",
-                            "payload": {"variant": "compressed"},
-                            "attempts": 0,
-                            "max_attempts": 3,
-                            "priority": 0,
-                            "last_error": None,
-                            "scheduled_at": "2026-01-01T00:00:00Z",
-                            "created_at": "2026-01-01T00:00:00Z",
-                        }
-                        self.jobs[job["id"]] = job
+                if artifact is not None:
+                    return Response(
+                        content=artifact,
+                        media_type="video/mp4",
+                        headers={
+                            "Content-disposition": (
+                                f'attachment; filename="{video_id}-compressed.mp4"'
+                            ),
+                            "X-Compressed": "true",
+                        },
+                    )
+                if not available:
                     return self._error(
                         404,
                         "compressed_not_ready",
-                        "The compressed copy is still being prepared.",
+                        "No compressed delivery copy exists for this video.",
                     )
+                size = video.get("file_size")
+                if not isinstance(size, int):
+                    size = len(original)
+                if size > COMPRESS_THRESHOLD_BYTES and not any(
+                    j["kind"] == "compress" and j["video_id"] == video_id
+                    for j in self.jobs.values()
+                ):
+                    job = {
+                        "id": str(uuid.uuid4()),
+                        "kind": "compress",
+                        "video_id": video_id,
+                        "status": "queued",
+                        "payload": {"variant": "compressed"},
+                        "attempts": 0,
+                        "max_attempts": 3,
+                        "priority": 0,
+                        "last_error": None,
+                        "scheduled_at": "2026-01-01T00:00:00Z",
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                    self.jobs[job["id"]] = job
                 return Response(
-                    content=artifact,
+                    content=original,
                     media_type="video/mp4",
-                    headers={
-                        "Content-disposition": f'attachment; filename="{video_id}-compressed.mp4"'
-                    },
+                    headers={"X-Compressed": "false"},
                 )
-            if variant:
-                return self._error(404, "not_found", f"Unknown media variant {variant}.")
-            video = self.videos.get(video_id)
-            if video is None or video["status"] not in {"downloaded", "transcribed"}:
+            if not available:
                 return self._error(404, "not_found", "Media is not available yet.")
-            return PlainTextResponse(self.media_bytes if self.media_bytes is not None else b"fake-media-bytes")
+            return Response(
+                content=original,
+                media_type="video/mp4",
+                headers={"X-Compressed": "false"},
+            )
 
         @app.get("/api/v1/videos/{video_id}/audio")
         async def get_audio(video_id: str, request: Request) -> Any:

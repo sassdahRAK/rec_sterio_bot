@@ -81,21 +81,21 @@ class ApiNetworkError(Exception):
 
 
 class CompressedNotReadyError(ApiError):
-    """The compressed copy of an oversize video is not on disk yet.
+    """The video has no media on disk at all.
 
-    ``GET /videos/{id}/media?variant=compressed`` answers 404 with the
-    ``compressed_not_ready`` envelope while the compress job still runs —
-    and that request side-effect (idempotently) enqueues the job, so a
-    later media request finds the artifact. Raised as its own type — while
-    remaining an :class:`ApiError` every handler already understands — so
-    the delivery chain can reply without string-matching the code.
+    A *missing* compressed copy is not this error: the endpoint degrades to
+    the original and marks it ``X-Compressed: false``. ``404
+    compressed_not_ready`` is reserved for a video with nothing on disk to
+    serve. Raised as its own type — while remaining an :class:`ApiError`
+    every handler already understands — so the delivery chain can reply
+    without string-matching the code.
     """
 
 
 class OversizeMediaError(Exception):
     """A media stream passed ``max_bytes`` and was abandoned mid-body.
 
-    Only :meth:`download_media_to` raises it; ``size_seen`` is the byte
+    Only :meth:`stream_media_to` raises it; ``size_seen`` is the byte
     count reached when the cap was crossed — the stream is then closed, so
     the caller knows the unit is oversize without ever having held more
     than *max_bytes* in hand.
@@ -104,6 +104,15 @@ class OversizeMediaError(Exception):
     def __init__(self, size_seen: int) -> None:
         super().__init__(f"media passed the {size_seen}-byte cap while streaming")
         self.size_seen = size_seen
+
+
+def _is_compressed_response(response: httpx.Response) -> bool:
+    """Whether a media response served the compressed delivery copy.
+
+    Every local media response carries ``X-Compressed: true|false``; a backend
+    that predates the marker counts as the original.
+    """
+    return response.headers.get("x-compressed", "").strip().lower() == "true"
 
 
 def _sleep(seconds: float) -> Awaitable[None]:
@@ -481,19 +490,35 @@ class ApiClient:
     async def retry_job(self, job_id: str, *, requested_by: str | None = None) -> dict[str, Any]:
         return await self.request("POST", f"/jobs/{job_id}/retry", requested_by=requested_by)
 
-    async def get_media(self, video_id: str, *, variant: str | None = None) -> bytes:
+    async def get_media(self, video_id: str, *, variant: str = "original") -> bytes:
         """The video's bytes; ``variant="compressed"`` asks for the smaller copy.
 
         The oversized original cannot be uploaded to Telegram, so the backend
         keeps a compressed artifact (h264 mp4, inside the bot's 50 MB ceiling)
-        for units past the limit. While that artifact is still being produced
-        the endpoint answers 404 ``compressed_not_ready`` — surfaced here as
+        for units past the limit. A thin wrapper over
+        :meth:`get_media_with_meta`, kept so existing callers keep receiving
+        plain bytes; use that method when the ``X-Compressed`` marker matters.
+        """
+        payload, _ = await self.get_media_with_meta(video_id, variant=variant)
+        return payload
+
+    async def get_media_with_meta(
+        self, video_id: str, *, variant: str = "original"
+    ) -> tuple[bytes, bool]:
+        """The bytes plus whether they are the compressed delivery copy.
+
+        ``variant=compressed`` degrades to the original when no copy exists,
+        so the bytes alone do not say which one arrived — the endpoint's
+        ``X-Compressed: true|false`` marker does. Only a video with nothing on
+        disk answers 404 ``compressed_not_ready``, surfaced here as
         :class:`CompressedNotReadyError` instead of a plain :class:`ApiError`.
         """
-        params = {"variant": variant} if variant else None
         try:
             response = await self.request(
-                "GET", f"/videos/{video_id}/media", params=params, expect_json=False
+                "GET",
+                f"/videos/{video_id}/media",
+                params={"variant": variant},
+                expect_json=False,
             )
         except ApiError as exc:
             if exc.status_code == 404 and exc.code == "compressed_not_ready":
@@ -501,28 +526,30 @@ class ApiClient:
                     exc.code, exc.message, exc.details, exc.status_code
                 ) from exc
             raise
-        return response.content
+        return response.content, _is_compressed_response(response)
 
-    async def download_media_to(
+    async def stream_media_to(
         self,
         video_id: str,
         path: str,
         *,
         max_bytes: int,
-        variant: str | None = None,
+        variant: str = "original",
         requested_by: str | None = None,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """Stream ``GET /videos/{id}/media`` to *path* without buffering it whole.
 
         For units whose recorded ``file_size`` is missing (or whose compressed
         copy has to be fetched), the whole body used to be pulled into memory
         before Telegram's 413 revealed it was oversize; streaming with a cap
-        decides by the actual size instead. Written bytes are returned on
-        success. When the body passes *max_bytes* without ending, the stream is
-        abandoned and :class:`OversizeMediaError` is raised.
+        decides by the actual size instead. Returns the bytes written and the
+        response's ``X-Compressed`` marker, so the caller can tell a real
+        delivery copy from an original the backend degraded to. When the body
+        passes *max_bytes* without ending, the stream is abandoned and
+        :class:`OversizeMediaError` is raised.
 
-        *variant* mirrors :meth:`get_media`: ``"compressed"`` asks for the
-        smaller copy, and a 404 ``compressed_not_ready`` becomes
+        *variant* mirrors :meth:`get_media_with_meta`: ``"compressed"`` asks
+        for the smaller copy, and a 404 ``compressed_not_ready`` becomes
         :class:`CompressedNotReadyError` — one error vocabulary on both media
         methods. That mapping matters most here: a backend that degrades a
         missing artifact to the *original* would otherwise stream a
@@ -535,7 +562,7 @@ class ApiClient:
         request = self._client.build_request(
             "GET",
             self.media_url(video_id),
-            params={"variant": variant} if variant else None,
+            params={"variant": variant},
             headers=self._headers(requested_by),
         )
         try:
@@ -547,12 +574,13 @@ class ApiClient:
                 await response.aread()
                 error = self._to_api_error(response)
                 if error.status_code == 404 and error.code == "compressed_not_ready":
-                    # Same mapping as get_media: the compressed copy is still
-                    # being made — the request (idempotently) queued the job.
+                    # Same mapping as get_media_with_meta: nothing on disk to
+                    # serve for either variant.
                     raise CompressedNotReadyError(
                         error.code, error.message, error.details, error.status_code
                     ) from error
                 raise error
+            compressed = _is_compressed_response(response)
             written = 0
             # The stream must land on disk; the per-chunk writes are tiny and
             # unbuffered, so the blocking `open` never stalls the loop long
@@ -567,6 +595,30 @@ class ApiClient:
             raise ApiNetworkError(str(exc) or type(exc).__name__, exc) from exc
         finally:
             await response.aclose()
+        return written, compressed
+
+    async def download_media_to(
+        self,
+        video_id: str,
+        path: str,
+        *,
+        max_bytes: int,
+        variant: str = "original",
+        requested_by: str | None = None,
+    ) -> int:
+        """Stream the media to *path* and return the bytes written.
+
+        A thin wrapper over :meth:`stream_media_to` for callers that only need
+        the byte count; use that method when the ``X-Compressed`` marker
+        matters.
+        """
+        written, _ = await self.stream_media_to(
+            video_id,
+            path,
+            max_bytes=max_bytes,
+            variant=variant,
+            requested_by=requested_by,
+        )
         return written
 
     async def get_audio(
