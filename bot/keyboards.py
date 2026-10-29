@@ -8,6 +8,7 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 __all__ = [
+    "cookies_keyboard",
     "help_keyboard",
     "jobs_keyboard",
     "merge_keyboard",
@@ -74,7 +75,10 @@ def video_keyboard(video_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Status", callback_data=f"status:{video_id}"),
                 InlineKeyboardButton("Transcript", callback_data=f"transcript:{video_id}"),
             ],
-            [InlineKeyboardButton("Media", callback_data=f"media:{video_id}")],
+            [
+                InlineKeyboardButton("Media", callback_data=f"media:{video_id}"),
+                InlineKeyboardButton("Audio", callback_data=f"audio:{video_id}"),
+            ],
         ]
     )
 
@@ -107,6 +111,13 @@ def jobs_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Failed only", callback_data="jobs:failed"),
             ]
         ]
+    )
+
+
+def cookies_keyboard() -> InlineKeyboardMarkup:
+    """The /cookies consent gate: agree, or remove the stored data."""
+    return rows_to_markup(
+        [[("I agree", "cookies:agree"), ("Remove my data", "cookies:remove")]]
     )
 
 

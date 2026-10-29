@@ -309,6 +309,37 @@ async def test_callback_mcheck_renders_merge(api_client, backend):
 
 
 @pytest.mark.asyncio
+async def test_callback_audio_sends_the_mp3(api_client, backend):
+    """The Audio button answers the query and delivers the stored mp3.
+
+    ``audio_command`` replies through ``update.effective_message``, which a
+    callback update also carries (the message the keyboard hangs on) — the
+    same path the ``status:`` branch already uses.
+    """
+    video = await api_client.create_video(
+        "https://youtu.be/audio-callback", requested_by="telegram:1"
+    )
+    video_id = video["id"]
+    # Walk the fake backend's status script to its end, the way /audio tests
+    # do — the command's own get_video must not reset the status to pending.
+    for _ in range(4):
+        await api_client.get_video(video_id)
+
+    update = _FakeCallbackUpdate(f"audio:{video_id}")
+    context = _ctx(api_client)
+    await merge_mod.on_callback(update, context)
+
+    assert update.callback_query.answers[-1]["text"] == "Fetching the audio…"
+    assert any(
+        "Fetching the audio" in r["text"] for r in update.message.replies
+    ), "the reply must land in the chat, not just the query toast"
+    documents = [m for m in context.bot.sent if m.get("document") is not None]
+    assert documents, "the mp3 should be delivered as a document"
+    assert documents[0]["document"] == b"fake-mp3"
+    assert documents[0]["filename"] == f"{video_id}.mp3"
+
+
+@pytest.mark.asyncio
 async def test_callback_unknown_action_is_answered(api_client):
     update = _FakeCallbackUpdate("nope:1")
     await merge_mod.on_callback(update, _ctx(api_client))

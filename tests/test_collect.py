@@ -119,9 +119,16 @@ async def test_an_unrecognised_method_re_asks(ctx):
     [
         ("1", "Manual browse"),
         ("manual", "Manual browse"),
+        # The full prompt line, exactly as the bot displays it, in both
+        # dash styles — a reply copied straight from the prompt must count.
+        ("1 — Manual browse", "Manual browse"),
+        ("1 - manual browse", "Manual browse"),
+        ("1—Manual browse", "Manual browse"),
         ("2", "Research API"),
         ("api", "Research API"),
         ("RESEARCH API", "Research API"),
+        ("2 — Research API", "Research API"),
+        ("  2 ", "Research API"),
         ("nonsense", None),
     ],
 )

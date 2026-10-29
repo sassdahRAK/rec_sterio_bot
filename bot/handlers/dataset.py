@@ -32,6 +32,7 @@ from ..helpers import (
     get_client,
     is_admin,
     is_uuid,
+    web_links,
 )
 
 logger = logging.getLogger(__name__)
@@ -243,7 +244,13 @@ async def folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             lines.append(f"  `{child.get('id', '?')}`")
 
-    await message.reply_text("\n".join(_clip(lines)), parse_mode=ParseMode.MARKDOWN)
+    # Portal link only, even for admins: the console has no per-folder route
+    # (just /dataset), so there is no console URL this button could open.
+    await message.reply_text(
+        "\n".join(_clip(lines)),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=web_links(update, context, folder_id=folder_id),
+    )
 
 
 # ---------------------------------------------------------------- cards
@@ -318,7 +325,14 @@ async def _list_cards(
         return
 
     lines = [f"*{heading}* (total {total})"] + _card_lines(items)
-    await message.reply_text("\n".join(_clip(lines)), parse_mode=ParseMode.MARKDOWN)
+    # A folder-scoped listing opens that folder in the portal (see the
+    # /folder comment for why admins get no console button here); a listing
+    # across all folders has no single page to open, so no button either.
+    await message.reply_text(
+        "\n".join(_clip(lines)),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=web_links(update, context, folder_id=folder_id),
+    )
 
 
 async def cards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

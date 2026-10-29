@@ -11,6 +11,7 @@ Flow:  /collect → paste link → location tag → method (button) → notes �
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,6 +27,7 @@ from telegram.ext import (
 
 from ..client import ApiError, ApiNetworkError
 from ..helpers import actor_for, escape_markdown, extract_url, get_client
+from .cookies import CONSENT_REQUIRED_HINT
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +60,36 @@ _METHOD_WORDS = {
     "manual": "Manual browse",
     "manual browse": "Manual browse",
     "browse": "Manual browse",
+    "1 — manual browse": "Manual browse",
+    "1 - manual browse": "Manual browse",
     "2": "Research API",
     "api": "Research API",
     "research": "Research API",
     "research api": "Research API",
+    "2 — research api": "Research API",
+    "2 - research api": "Research API",
 }
+
+# A reply that quotes the whole prompt line: the option digit, a run of
+# separators (dash, dot, colon, bracket, spaces), then the words.
+_METHOD_LINE = re.compile(r"^([12])[\s.\):—–-]*(.*)$")
 
 
 def parse_method(text: str) -> str | None:
-    """Map a reply onto one of the two collection methods, or None."""
-    return _METHOD_WORDS.get(text.strip().lower())
+    """Map a reply onto one of the two collection methods, or None.
+
+    The bare digit ("1"), the method name ("manual browse"), or the whole
+    prompt line ("1 — Manual browse") in either dash style all count.
+    """
+    normalized = text.strip().lower()
+    method = _METHOD_WORDS.get(normalized)
+    if method is not None:
+        return method
+    line = _METHOD_LINE.match(normalized)
+    if line is None:
+        return None
+    digit, words = line.groups()
+    return _METHOD_WORDS.get(digit) or _METHOD_WORDS.get(words)
 
 SKIP_HINT = "Send `-` or /skip to leave it empty."
 
@@ -152,6 +174,11 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     try:
         video = await client.create_video(url, requested_by=actor_for(update))
     except ApiError as exc:
+        if getattr(exc, "code", "") == "consent_required":
+            # The wizard stays on the URL step: run /cookies (which works as a
+            # command even mid-wizard), then paste the link again.
+            await message.reply_text(CONSENT_REQUIRED_HINT)
+            return ASK_URL
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return ASK_URL
     except ApiNetworkError as exc:

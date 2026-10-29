@@ -18,7 +18,8 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiClient, ApiError, ApiNetworkError
-from ..helpers import actor_for, escape_markdown, get_client, is_uuid
+from ..helpers import actor_for, escape_markdown, get_client, is_uuid, web_links
+from ..inflight import get_inflight
 from ..keyboards import merge_keyboard, merge_list_keyboard
 from . import media as media_handler
 from . import status as status_handler
@@ -552,6 +553,11 @@ async def apply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
+#: Actions that ship bytes to the chat or write a row. A second tap while one
+#: is still running would repeat the whole fetch/upload — see `bot.inflight`.
+GUARDED_ACTIONS = frozenset({"media", "audio", "transcript", "apply", "merge", "mcheck", "mlist"})
+
+
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle merge-related inline buttons."""
     query = update.callback_query
@@ -566,14 +572,55 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer(text=str(exc)[:180], show_alert=True)
         return
 
+    # A double-tapped button sends two callbacks; the second must not fetch and
+    # upload the same file again. Keyed per chat so two different users asking
+    # for the same video are not made to wait for each other.
+    guard = get_inflight(context)
+    key = ""
+    if action in GUARDED_ACTIONS:
+        key = f"{action}:{query.message.chat_id if query.message else 0}:{arg}"
+        if not await guard.claim(key):
+            await query.answer(
+                text="Already working on that — one moment.", show_alert=False
+            )
+            return
+
+    try:
+        await _dispatch(update, query, context, client, action, arg)
+    finally:
+        if key:
+            await guard.release(key)
+
+
+async def _dispatch(
+    update: Update,
+    query: Any,
+    context: ContextTypes.DEFAULT_TYPE,
+    client: Any,
+    action: str,
+    arg: str,
+) -> None:
+    """The button actions themselves, with the double-tap guard already held."""
     try:
         if action == "media" and arg:
             # The media endpoint is authenticated, so the bot fetches the bytes
             # with its own token and uploads them to the chat.
             await query.answer("Fetching the media…")
             await media_handler.deliver_media(
-                context.bot, query.message.chat_id, client, arg
+                context.bot,
+                query.message.chat_id,
+                client,
+                arg,
+                reply_markup=web_links(update, context, video_id=arg),
             )
+            return
+
+        if action == "audio" and arg:
+            # Same flow as /audio: the command replies through
+            # update.effective_message, which a callback update also carries.
+            await query.answer("Fetching the audio…")
+            context.args = [arg]
+            await media_handler.audio_command(update, context)
             return
 
         if action == "status" and arg:

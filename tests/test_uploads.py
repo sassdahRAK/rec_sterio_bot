@@ -5,8 +5,11 @@ enough. A file the user already has must go through the same pipeline.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from bot.config import Settings
 from bot.handlers.uploads import TELEGRAM_MAX_DOWNLOAD, handle_media_upload
 
 from .conftest import FakeBot, FakeContext, FakeUpdate
@@ -62,6 +65,47 @@ async def test_a_sent_video_is_uploaded_and_queued(api_client, backend):
 
 
 @pytest.mark.asyncio
+async def test_a_direct_upload_is_not_echoed_back(api_client, backend):
+    """The upload watcher stays silent: no echoed file, no "download" wording.
+
+    The user already has the file they sent, so the watch says nothing until
+    the terminal "Transcript ready" notification.
+    """
+    bot = FakeBot()
+    settings = Settings(
+        telegram_bot_token="t",
+        bot_api_token="test-service-token",
+        bot_api_base_url="http://testserver/api/v1",
+        admin_telegram_ids="999",
+        poll_interval_seconds=0.01,
+        poll_timeout_seconds=5.0,
+    )
+    ctx = FakeContext(bot_data={"api": api_client, "settings": settings}, bot=bot)
+    update = MediaMessage(video=FakeTelegramFile())
+
+    await handle_media_upload(update, ctx)
+
+    assert backend.uploads, "the file should have reached the backend"
+    video_id = next(iter(backend.videos))
+    watchers = ctx.bot_data["watchers"]
+
+    # Let the background watch run to its terminal status.
+    for _ in range(500):
+        if not watchers.is_watching(video_id):
+            break
+        await asyncio.sleep(0.01)
+    assert not watchers.is_watching(video_id), "the watch should settle"
+
+    # No echo: the file is never sent back to the chat.
+    assert not any(m.get("document") is not None for m in bot.sent)
+    # And no "download"-worded notice — nothing was downloaded.
+    texts = [m["text"] for m in bot.sent]
+    assert not any("download" in t.lower() for t in texts)
+    # The terminal notification is the one message a direct upload waits for.
+    assert any("Transcript ready" in t for t in texts)
+
+
+@pytest.mark.asyncio
 async def test_a_sent_audio_file_is_accepted(api_client, backend):
     update = MediaMessage(audio=FakeTelegramFile("voice.mp3", 2048, b"a" * 2048))
     ctx = FakeContext(bot_data={"api": api_client, "settings": None})
@@ -95,6 +139,32 @@ async def test_an_oversized_file_is_refused_before_download(api_client, backend)
     assert not telegram_file.downloaded, "an oversized file must not be fetched"
     replies = " ".join(r["text"] for r in update.message.replies)
     assert "Telegram" in replies
+
+
+@pytest.mark.asyncio
+async def test_upload_reply_carries_the_console_link_for_an_admin(api_client, backend):
+    bot = FakeBot()
+    settings = Settings(
+        telegram_bot_token="t",
+        bot_api_token="test-service-token",
+        bot_api_base_url="http://testserver/api/v1",
+        admin_telegram_ids="999",
+        poll_interval_seconds=0.01,
+        poll_timeout_seconds=5.0,
+    )
+    ctx = FakeContext(bot_data={"api": api_client, "settings": settings}, bot=bot)
+    update = MediaMessage(video=FakeTelegramFile(), user_id=999)  # admin
+
+    await handle_media_upload(update, ctx)
+
+    video_id = next(iter(backend.videos))
+    edits = update.message.edits
+    markup = edits[-1]["reply_markup"]  # the "✅ Uploaded" notice
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    # A fresh upload is unfiled, so an admin sees the console button only.
+    assert f"https://console.test/videos/{video_id}" in urls
+    assert "Status" in [b.text for row in markup.inline_keyboard for b in row]
+    await ctx.bot_data["watchers"].cancel_all()
 
 
 @pytest.mark.asyncio

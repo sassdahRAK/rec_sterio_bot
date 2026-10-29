@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from bot.config import Settings
 from bot.handlers.admin import jobretry_command, jobs_command, retry_command
-from tests.conftest import FakeContext, FakeUpdate
+from tests.conftest import FakeBot, FakeContext, FakeUpdate
 
 
 def _context(client, admin_ids="999", args=None):
@@ -15,6 +17,18 @@ def _context(client, admin_ids="999", args=None):
         admin_telegram_ids=admin_ids,
     )
     return FakeContext(args=list(args or []), bot_data={"api": client, "settings": settings})
+
+
+def _fast_settings(admin_ids="999"):
+    """Poll settings that let a background watch settle inside a test."""
+    return Settings(
+        telegram_bot_token="t",
+        bot_api_token="test-service-token",
+        bot_api_base_url="http://testserver/api/v1",
+        admin_telegram_ids=admin_ids,
+        poll_interval_seconds=0.01,
+        poll_timeout_seconds=5.0,
+    )
 
 
 async def test_non_admin_cannot_list_jobs(api_client, backend):
@@ -70,6 +84,7 @@ async def test_admin_can_retry_a_video(api_client, backend):
 
     assert "Re-queued" in update.message.replies[0]["text"]
     assert any(r["path"] == f"/api/v1/videos/{video['id']}/retry" for r in backend.requests)
+    await ctx.bot_data["watchers"].cancel_all()
 
 
 async def test_admin_can_retry_a_job(api_client, backend):
@@ -82,3 +97,101 @@ async def test_admin_can_retry_a_job(api_client, backend):
 
     assert "re-queued" in update.message.replies[0]["text"]
     assert any(r["path"] == f"/api/v1/jobs/{job_id}/retry" for r in backend.requests)
+    await ctx.bot_data["watchers"].cancel_all()
+
+
+async def test_admin_retry_starts_a_watch_that_delivers_the_media(api_client, backend):
+    """/retry must not just re-queue: the admin's chat gets the same background
+    watch a fresh link gets, so the media is delivered (instruction.txt #2)
+    and the Telegram copy is recorded (instruction.txt #4)."""
+    video = await api_client.create_video("https://youtu.be/x", requested_by="telegram:1")
+    bot = FakeBot()
+    ctx = FakeContext(
+        args=[video["id"]],
+        bot_data={"api": api_client, "settings": _fast_settings()},
+        bot=bot,
+    )
+    update = FakeUpdate(user_id=999)  # admin
+
+    await retry_command(update, ctx)
+
+    assert "Re-queued" in update.message.replies[0]["text"]
+    # the fake backend walks the video back through the status ladder, so the
+    # watch settles at `transcribed` within a few polls
+    watchers = ctx.bot_data["watchers"]
+    for _ in range(500):  # bounded wait (~5s); settles in well under a second
+        if not watchers.is_watching(video["id"]):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("the watch started by /retry did not settle")
+
+    documents = [m for m in bot.sent if m.get("document") is not None]
+    assert documents, "the retried video's file should arrive without being asked"
+    assert documents[0]["document"] == b"fake-media-bytes"
+    assert documents[0]["chat_id"] == update.effective_chat.id
+    texts = [m["text"] for m in bot.sent if "text" in m]
+    assert any("Transcript ready" in t for t in texts)
+    # instruction.txt #4: delivering the file also records the Telegram copy
+    assert backend.telegram_links, "the delivered Telegram copy must be recorded"
+    assert backend.telegram_links[0]["file_id"].startswith("file-")
+
+
+async def test_admin_retry_threads_the_console_link_into_the_watch(api_client, backend):
+    """/retry computes the link buttons once: the reply gets them and so does
+    every notification the background watch later sends."""
+    video = await api_client.create_video("https://youtu.be/retry-links", requested_by="telegram:1")
+    bot = FakeBot()
+    ctx = FakeContext(
+        args=[video["id"]],
+        bot_data={"api": api_client, "settings": _fast_settings()},
+        bot=bot,
+    )
+    update = FakeUpdate(user_id=999)  # admin
+
+    await retry_command(update, ctx)
+
+    markup = update.message.replies[0]["reply_markup"]
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    assert f"https://console.test/videos/{video['id']}" in urls
+
+    watchers = ctx.bot_data["watchers"]
+    for _ in range(500):  # bounded wait (~5s); settles in well under a second
+        if not watchers.is_watching(video["id"]):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("the watch started by /retry did not settle")
+
+    ready = [m for m in bot.sent if "Transcript ready" in m.get("text", "")]
+    assert ready, "the watch must reach its terminal notification"
+    urls = [b.url for row in ready[0]["reply_markup"].inline_keyboard for b in row]
+    assert f"https://console.test/videos/{video['id']}" in urls
+
+
+async def test_admin_jobretry_watches_download_jobs_only(api_client, backend):
+    video = await api_client.create_video("https://youtu.be/x", requested_by="telegram:1")
+    download_job = next(j for j in backend.jobs.values() if j["kind"] == "download")
+    # a transcribe job on the same video — retried, but nothing re-downloads
+    await api_client.generate_transcript(video["id"])
+    transcribe_job = next(j for j in backend.jobs.values() if j["kind"] == "transcribe")
+    update = FakeUpdate(user_id=999)  # admin
+
+    ctx = FakeContext(
+        args=[download_job["id"]],
+        bot_data={"api": api_client, "settings": _fast_settings()},
+    )
+    await jobretry_command(update, ctx)
+
+    assert ctx.bot_data["watchers"].is_watching(video["id"])
+    await ctx.bot_data["watchers"].cancel_all()
+
+    # other job kinds do not re-download, so no watch is started for them
+    ctx = FakeContext(
+        args=[transcribe_job["id"]],
+        bot_data={"api": api_client, "settings": _fast_settings()},
+    )
+    await jobretry_command(update, ctx)
+
+    watchers = ctx.bot_data.get("watchers")
+    assert watchers is None or not watchers.is_watching(video["id"])

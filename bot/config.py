@@ -36,6 +36,21 @@ class Settings(BaseSettings):
     # --- Admin allow-list (comma separated Telegram user ids) ---
     admin_telegram_ids: str = Field(default="", description="Comma separated Telegram user ids allowed to use admin commands.")
 
+    # --- Linked-console admin cache ---
+    # How often the bot re-pulls the Telegram ids of linked console admins
+    # (GET /bot-users/admin-ids) into bot_data['admin_ids_cache'].
+    admin_ids_refresh_minutes: float = Field(default=5.0, gt=0.0)
+
+    # --- Web frontends (the tappable link buttons under bot replies) ---
+    portal_frontend_url: str = Field(
+        default="http://localhost:5174",
+        description="Base URL of the public portal; used for the per-folder 'Open folder' links.",
+    )
+    admin_frontend_url: str = Field(
+        default="http://localhost:5173",
+        description="Base URL of the admin console (in production it is served under /console).",
+    )
+
     # --- Tunables (all optional, sane defaults) ---
     request_timeout_seconds: float = Field(default=15.0, ge=1.0)
     poll_interval_seconds: float = Field(default=5.0, gt=0.0)
@@ -43,6 +58,9 @@ class Settings(BaseSettings):
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_seconds: float = Field(default=0.5, ge=0.0)
     transcript_text_limit: int = Field(default=3000, ge=256)
+    # Upper bound for a cookies.txt handed in via /cookies — a real one is a
+    # few hundred bytes, so anything near this limit is the wrong file.
+    cookies_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1)
 
     @property
     def admin_ids(self) -> frozenset[int]:

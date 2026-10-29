@@ -11,7 +11,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import escape_markdown, get_client, is_uuid
+from ..helpers import escape_markdown, get_client, is_uuid, web_links
 from ..keyboards import transcript_versions_keyboard
 
 logger = logging.getLogger(__name__)
@@ -94,17 +94,28 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     source = transcript.get("source", "?")
     status = transcript.get("status", "?")
 
+    # The link buttons need the video's folder, which the transcript payload
+    # does not carry — fetch the video tolerantly, once, for every reply below.
+    try:
+        video = await client.get_video(video_id)
+    except (ApiError, ApiNetworkError):
+        video = {}
+    links = web_links(update, context, video=video, video_id=video_id)
+
     if status != "ready":
         await message.reply_text(
             f"Transcript v{version} (source={escape_markdown(source)}) is `{status}` — not ready yet.",
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=links,
         )
         return
 
     header = f"Transcript v{version} (source={source}) — {len(content)} chars"
     if len(content) <= _limit(context):
         await message.reply_text(
-            f"{header}\n\n{escape_markdown(content)}", parse_mode=ParseMode.MARKDOWN
+            f"{header}\n\n{escape_markdown(content)}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=links,
         )
         return
 
@@ -116,6 +127,7 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"{header}\nSent as a file because it is longer than "
             f"{_limit(context)} characters."
         ),
+        reply_markup=links,
     )
 
 

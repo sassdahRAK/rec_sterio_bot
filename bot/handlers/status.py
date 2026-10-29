@@ -10,7 +10,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import format_video_status, get_client, is_uuid
+from ..helpers import format_video_status, get_client, is_uuid, web_links
 from ..keyboards import video_keyboard
 
 logger = logging.getLogger(__name__)
@@ -62,5 +62,5 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await message.reply_text(
         body,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=video_keyboard(video_id),
+        reply_markup=web_links(update, context, video=video, markup=video_keyboard(video_id)),
     )

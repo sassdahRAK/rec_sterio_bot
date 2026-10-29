@@ -108,6 +108,7 @@ def test_escaper_matches_telegrams_own_helper():
 
 
 def test_usage_strings_and_welcome_are_parseable():
+    from bot.handlers.media import AUDIO_USAGE
     from bot.handlers.media import USAGE as MEDIA_USAGE
     from bot.handlers.merge import APPLY_USAGE, MERGE_USAGE, MERGES_USAGE
     from bot.handlers.status import USAGE as STATUS_USAGE
@@ -117,6 +118,7 @@ def test_usage_strings_and_welcome_are_parseable():
         WELCOME,
         STATUS_USAGE,
         MEDIA_USAGE,
+        AUDIO_USAGE,
         TRANSCRIPT_USAGE,
         "Usage: /transcripts <video id>",
         MERGE_USAGE,

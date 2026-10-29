@@ -1,0 +1,21 @@
+For Telegram bot
+1. Pass the link for download
+2. Send the video back after download 
+3. transcript, allow editing the transcript and save to the database(Can edit transcript from bot)
+4. Store video in telegram by telegram drive and link to database: we can load when use it: https://github.com/caamer20/Telegram-Drive.git
+5. Scraps from TikTok and facebook: https://github.com/drawrowfly/tiktok-scraper, https://github.com/kevinzg/facebook-scraper
+6. require schemma from TV NA platform 
+    ```
+    ID:              PP-[sequential number, e.g., PP-001]
+    Platform:        TikTok
+    Source Type:     Video / Discover Page / Profile
+    Author/Handle:   @username (and display name if shown)
+    Date Posted:     YYYY-MM-DD (or "n.d." if unavailable)
+    Caption (verbatim): First 20 words of caption, exactly as displayed
+    URL:             Full permalink (https://www.tiktok.com/@handle/video/ID)
+    Location Tag:    Place name as stated in content (e.g., "Chew & Bash, Phnom Penh")
+    Collection Method: Manual browse / Research API
+    Collected By:    [Team member name]
+    Collection Date: YYYY-MM-DD
+    Notes:           Relevance assessment; access issues; content warnings
+    ```

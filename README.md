@@ -96,6 +96,23 @@ cp .env.example .env    # then edit it — never commit .env
 | `BOT_API_TOKEN` | yes | Service token sent as `Authorization: Bearer …`. |
 | `BOT_API_BASE_URL` | yes (default given) | Backend base URL, including `/api/v1`. |
 | `ADMIN_TELEGRAM_IDS` | for admin commands | Comma separated Telegram user ids. |
+| `PORTAL_FRONTEND_URL` | for portal links | Portal base — `https://your-host` deployed, or this machine's LAN IP in dev (`http://192.168.1.50:5174`). |
+| `ADMIN_FRONTEND_URL` | for console links | Console base — `https://your-host/console` deployed, or the LAN IP on `:5173` in dev. |
+
+**Loopback is not a working button URL.** Telegram answers `BadRequest: ... is
+invalid: wrong http url` for `localhost`/`127.0.0.1`/`[::1]` and fails the whole
+`sendMessage`, so such a button is hidden and a one-time warning names the
+variable to fix. A **LAN address is accepted** (probed against the live Bot
+API), so local development sets these to the Mac's IP — then the "Go to portal"
+button opens the portal on the operator's phone, on the same Wi-Fi. The Vite dev
+servers bind `0.0.0.0` for exactly this (`host: true` in both `vite.config.ts`).
+
+"Go to portal" points at the portal's per-video page (`/video/<id>`); admins
+also get "Go to admin" for the console's per-video page. That portal page is
+also what a `/media` reply links to — as a button *and* as a spelled-out URL —
+when the file is too large for Telegram (a bot may upload at most 50 MB) or the
+upload fails (the link to Telegram is slow: a 13.5 MB clip measured 172 s, so
+the write budget is 300 s). See `deliver_media` in `handlers/media.py`.
 
 All secrets come from the environment only. The token is never logged, never
 echoed, and never written to a file by the bot.

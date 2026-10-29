@@ -10,11 +10,15 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 __all__ = ["FakeBackend", "make_backend"]
 
 DEFAULT_STATUS_SCRIPT = ["pending", "downloading", "downloaded", "transcribed"]
+
+#: The consent-text version the backend currently serves; POSTing a different
+#: version is the 422 version_mismatch path.
+DEFAULT_CONSENT_VERSION = "2026-10-28.1"
 
 
 class FakeBackend:
@@ -46,6 +50,29 @@ class FakeBackend:
         self.transcript_content: str = "Hello world. This is a short transcript."
         self.transcript_language: str = "en"
         self.long_transcript_content: str | None = None
+        #: per-Telegram-user consent + cookies records (/bot-users/{uid})
+        self.bot_users: dict[int, dict[str, Any]] = {}
+        #: one-time console link codes → the account email they point at
+        self.link_codes: dict[str, str] = {}
+        #: telegram ids already linked to a console account
+        #: (uid → {email, name, role}); mirrored into GET /bot-users/{uid}
+        self.linked: dict[int, dict[str, Any]] = {}
+        #: when True, POST /bot-users/{uid}/link answers 409 already_linked
+        #: (given a valid code) — the "linked to a different console account"
+        #: path.
+        self.link_conflict = False
+        #: ids returned by GET /bot-users/admin-ids (linked ACTIVE admins)
+        self.admin_ids: list[int] = []
+        #: bodies received by POST /bot-users/{uid}/link (both phases)
+        self.link_redeems: list[dict[str, Any]] = []
+        #: bodies received by POST /bot-users/{uid}/cookies (multipart)
+        self.cookie_uploads: list[dict[str, Any]] = []
+        #: the consent version a POST must match; mismatch → 422
+        self.consent_version: str = DEFAULT_CONSENT_VERSION
+        #: when True, POST /videos answers 403 consent_required for a
+        #: tiktok/facebook URL from a telegram user without consent + cookies.
+        #: Off by default so the pre-gate link tests keep their behaviour.
+        self.enforce_consent_gate = False
         #: when set, the next request raises this HTTP status with this body
         self.fail_next: tuple[int, str, str] | None = None
         self.app = FastAPI(title="fake-recsterio")
@@ -183,6 +210,53 @@ class FakeBackend:
         for key, value in overrides.items():
             video[key] = value
 
+    def _empty_bot_user(self, telegram_id: int) -> dict[str, Any]:
+        return {
+            "telegram_id": telegram_id,
+            "consented": False,
+            "consented_at": None,
+            "consent_version": None,
+            "cookies_present": False,
+            "cookies_updated_at": None,
+        }
+
+    def _link_account(self, email: str) -> dict[str, Any]:
+        """The console account a link code points at (name/role derived)."""
+        local = email.split("@", 1)[0]
+        name = local.replace(".", " ").replace("_", " ").strip().title() or email
+        return {
+            "account_email": email,
+            "account_name": name,
+            "account_role": "admin",
+        }
+
+    def _consent_gate_error(self, request: Request, source_url: str) -> JSONResponse | None:
+        """The pinned contract's gate: tiktok/facebook needs consent + cookies.
+
+        Only applies to telegram users (``X-Requested-By: telegram:<uid>``);
+        any other caller — the dashboard, the service token itself — passes.
+        """
+        if not self.enforce_consent_gate:
+            return None
+        requested_by = request.headers.get("x-requested-by") or ""
+        if not requested_by.startswith("telegram:"):
+            return None
+        try:
+            uid = int(requested_by.split(":", 1)[1])
+        except ValueError:
+            return None
+        host = source_url.split("://", 1)[-1].split("/", 1)[0].lower()
+        if "tiktok" not in host and "facebook" not in host:
+            return None
+        record = self.bot_users.get(uid)
+        if record is not None and record.get("consented") and record.get("cookies_present"):
+            return None
+        return self._error(
+            403,
+            "consent_required",
+            "Run /cookies in the bot to allow downloads with your own session.",
+        )
+
     # -- routes ------------------------------------------------------------
     def _register_routes(self) -> None:
         app = self.app
@@ -230,6 +304,9 @@ class FakeBackend:
                     "source_url must be a valid http(s) URL.",
                     [{"field": "source_url", "issue": "invalid_url"}],
                 )
+            gate = self._consent_gate_error(request, source_url)
+            if gate is not None:
+                return gate
             for video in self.videos.values():
                 if video["source_url"] == source_url and video["status"] != "failed":
                     return JSONResponse(status_code=409, content=video)
@@ -249,6 +326,12 @@ class FakeBackend:
                 "mime_type": "video/mp4",
                 "checksum_sha256": None,
                 "thumbnail_url": None,
+                # Parity with VideoOut: the Telegram copy recorded by
+                # POST /videos/{id}/telegram, absent until one exists.
+                "telegram_file_id": None,
+                # Parity with VideoOut: the folder the video is filed into,
+                # None until it is filed (the portal link button reads it).
+                "folder_id": None,
                 "created_by": request.headers.get("x-requested-by", "system"),
                 "created_at": "2026-01-01T00:00:00Z",
                 "updated_at": "2026-01-01T00:00:00Z",
@@ -310,6 +393,9 @@ class FakeBackend:
                 "mime_type": "video/mp4",
                 "checksum_sha256": "deadbeef",
                 "thumbnail_url": None,
+                "telegram_file_id": None,
+                # Parity with VideoOut, like the link-created video above.
+                "folder_id": None,
                 "created_by": request.headers.get("x-requested-by", "system"),
                 "created_at": "2026-01-01T00:00:00Z",
                 "updated_at": "2026-01-01T00:00:00Z",
@@ -348,6 +434,33 @@ class FakeBackend:
             if video is None or video["status"] not in {"downloaded", "transcribed"}:
                 return self._error(404, "not_found", "Media is not available yet.")
             return PlainTextResponse("fake-media-bytes")
+
+        @app.get("/api/v1/videos/{video_id}/audio")
+        async def get_audio(video_id: str, request: Request) -> Any:
+            """The extracted mp3, mirroring the media route's availability."""
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            if request.query_params.get("format", "mp3") != "mp3":
+                return self._error(
+                    422,
+                    "validation_failed",
+                    "format must be mp3.",
+                    [{"field": "format", "issue": "unsupported_format"}],
+                )
+            video = self.videos.get(video_id)
+            if video is None or video["status"] not in {"downloaded", "transcribed"}:
+                return self._error(
+                    404, "not_found", "MP3 has not been extracted for this video."
+                )
+            return Response(
+                content=b"fake-mp3",
+                media_type="audio/mpeg",
+                headers={
+                    "Content-disposition": f'attachment; filename="{video_id}-audio.mp3"'
+                },
+            )
 
         @app.get("/api/v1/videos/{video_id}/transcript")
         async def get_transcript(video_id: str, request: Request) -> Any:
@@ -855,6 +968,156 @@ class FakeBackend:
                 media_type="application/zip",
                 headers={"Content-disposition": "attachment; filename=dataset.zip"},
             )
+
+        # ------------------------------------------------------- bot-users
+        # Per-user consent + cookies behind /bot-users/{uid}, plus the console
+        # account-linking surface, mirroring the pinned contract the real
+        # backend implements.
+
+        # Declared before /bot-users/{telegram_id} so "admin-ids" is not
+        # swallowed by the id route.
+        @app.get("/api/v1/bot-users/admin-ids")
+        async def get_admin_ids(request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            return {"ids": list(self.admin_ids)}
+
+        @app.post("/api/v1/bot-users/{telegram_id}/link")
+        async def link_account(telegram_id: int, request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            # The real contract pins the acting user: X-Requested-By must be
+            # the linking Telegram id. Lenient — only enforced when present,
+            # so callers that skip the header still work.
+            requested_by = request.headers.get("x-requested-by")
+            if requested_by and requested_by != f"telegram:{telegram_id}":
+                return self._error(
+                    403, "forbidden", "X-Requested-By must be the linking telegram id."
+                )
+            body = await request.json()
+            code = body.get("code")
+            confirm = bool(body.get("confirm"))
+            self.link_redeems.append(
+                {
+                    "telegram_id": telegram_id,
+                    "code": code,
+                    "confirm": confirm,
+                    "requested_by": requested_by,
+                }
+            )
+            email = self.link_codes.get(code)
+            if email is None:
+                return self._error(401, "unauthorized", "That link code is not valid.")
+            if self.link_conflict:
+                return self._error(
+                    409,
+                    "already_linked",
+                    "This Telegram account is already linked to a different console account.",
+                )
+            if not confirm:
+                # The dry-run: name the target account, link nothing.
+                return {"account_email": email}
+            account = self._link_account(email)
+            # The link is made: the code was one-time, the id is linked now.
+            self.link_codes.pop(code, None)
+            self.linked[telegram_id] = {
+                "email": account["account_email"],
+                "name": account["account_name"],
+                "role": account["account_role"],
+            }
+            return account
+
+        @app.get("/api/v1/bot-users/{telegram_id}")
+        async def get_bot_user(telegram_id: int, request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            linked = self.linked.get(telegram_id)
+            record = self.bot_users.get(telegram_id)
+            if record is None and linked is None:
+                return self._error(404, "not_found", f"No bot user {telegram_id}.")
+            if record is None:
+                # A linked user has a row even before /cookies creates one.
+                record = self._empty_bot_user(telegram_id)
+            return {
+                **record,
+                "linked_email": linked["email"] if linked else None,
+                "linked_name": linked.get("name") if linked else None,
+                "linked_role": linked.get("role") if linked else None,
+            }
+
+        @app.post("/api/v1/bot-users/{telegram_id}/consent")
+        async def create_consent(telegram_id: int, request: Request) -> Any:
+            self._record(request)
+            failure = self._maybe_fail()
+            if failure is not None:
+                return failure
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            body = await request.json()
+            if body.get("consent_version") != self.consent_version:
+                return self._error(
+                    422,
+                    "version_mismatch",
+                    "The consent text has changed — run /cookies again.",
+                )
+            record = self.bot_users.setdefault(
+                telegram_id, self._empty_bot_user(telegram_id)
+            )
+            record.update(
+                {
+                    "consented": True,
+                    "consented_at": record.get("consented_at") or "2026-10-28T00:00:00Z",
+                    "consent_version": body.get("consent_version"),
+                }
+            )
+            return record
+
+        @app.delete("/api/v1/bot-users/{telegram_id}")
+        async def delete_bot_user(telegram_id: int, request: Request) -> Any:
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            self.bot_users.pop(telegram_id, None)
+            return Response(status_code=204)
+
+        @app.post("/api/v1/bot-users/{telegram_id}/cookies")
+        async def upload_cookies(telegram_id: int, request: Request) -> Any:
+            # Multipart with a `file` part (text/plain); the raw body is
+            # recorded like the video upload route does.
+            self._record(request)
+            failure = self._maybe_fail()
+            if failure is not None:
+                return failure
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            raw = await request.body()
+            self.cookie_uploads.append(
+                {
+                    "content_type": request.headers.get("content-type", ""),
+                    "bytes": len(raw),
+                    "requested_by": request.headers.get("x-requested-by"),
+                }
+            )
+            if not raw:
+                return self._error(422, "validation_failed", "The cookies file is empty.")
+            record = self.bot_users.setdefault(
+                telegram_id, self._empty_bot_user(telegram_id)
+            )
+            record["cookies_present"] = True
+            record["cookies_updated_at"] = "2026-10-28T00:00:00Z"
+            return {
+                "cookies_present": True,
+                "cookies_updated_at": record["cookies_updated_at"],
+            }
 
 
 def make_backend(token: str = "test-service-token") -> FakeBackend:

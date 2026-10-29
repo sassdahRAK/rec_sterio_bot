@@ -15,8 +15,9 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import escape_markdown, get_client, is_admin, is_uuid
+from ..helpers import escape_markdown, get_client, is_admin, is_uuid, web_links
 from ..keyboards import jobs_keyboard
+from .links import start_watch
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Re-enqueue the download job for a video — admins only."""
+    """Re-enqueue the download job for a video and watch it — admins only."""
     message = update.effective_message
     if message is None:
         return
@@ -116,20 +117,39 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         job = await client.retry_video(video_id)
     except ApiError as exc:
+        if getattr(exc, "code", "") == "job_in_progress":
+            # A double-tapped /retry used to queue a second download of the same
+            # file. The API now refuses; say that plainly rather than echoing a
+            # machine code.
+            await message.reply_text(
+                "That video is already queued for download — nothing to retry.\n"
+                f"Use /status {video_id} to watch it.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
+    links = web_links(update, context, video_id=video_id)
     await message.reply_text(
-        "♻️ Re-queued video `{vid}`.\nJob `{job}` · status `{status}`.".format(
+        "♻️ Re-queued video `{vid}`.\nJob `{job}` · status `{status}`.\n"
+        "I will watch it and send the media here once it is ready.".format(
             vid=video_id,
             job=job.get("id", "?") if isinstance(job, Mapping) else "?",
             status=job.get("status", "?") if isinstance(job, Mapping) else "?",
         ),
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=links,
     )
+
+    # The retry re-runs the pipeline from the top, so the admin's chat gets
+    # the same background watch a fresh link gets: the media is delivered at
+    # `downloaded` and the "Transcribed" notice arrives at the terminal status.
+    # The links computed above travel with the watch, like they do for a link.
+    start_watch(context, client, update.effective_chat.id, video_id, reply_markup=links)
 
 
 async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -174,6 +194,20 @@ async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ),
         parse_mode=ParseMode.MARKDOWN,
     )
+
+    # A retried *download* job re-walks the pipeline from the top, so it gets
+    # the same watch a fresh link gets. Other kinds (e.g. transcribe) do not
+    # re-download the media, so there is nothing for a watch to deliver.
+    if isinstance(job, Mapping):
+        job_video_id = job.get("video_id")
+        if job.get("kind") == "download" and job_video_id:
+            start_watch(
+                context,
+                client,
+                update.effective_chat.id,
+                str(job_video_id),
+                reply_markup=web_links(update, context, video_id=str(job_video_id)),
+            )
 
 
 def _items(payload: Any) -> list[Any]:

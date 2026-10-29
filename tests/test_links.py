@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from bot.config import Settings
 from bot.handlers.links import WatchRegistry, handle_link, watch_video
 from tests.conftest import FakeBot, FakeContext, FakeUpdate
@@ -79,7 +81,8 @@ async def test_watch_notifies_when_download_completes(api_client, backend):
     )
 
     assert status in {"downloaded", "transcribed"}
-    texts = [m["text"] for m in bot.sent]
+    # The auto-delivered file also lands in bot.sent; only its notice is text.
+    texts = [m["text"] for m in bot.sent if "text" in m]
     assert any("Download complete" in t for t in texts)
     # The media endpoint is authenticated, so the message must point at the
     # /media command (which uploads the file) rather than a raw API URL that
@@ -99,7 +102,8 @@ async def test_watch_ends_on_transcribed_and_reports_transcript(api_client, back
     )
 
     assert status == "transcribed"
-    assert any("Transcript ready" in m["text"] for m in bot.sent)
+    texts = [m["text"] for m in bot.sent if "text" in m]
+    assert any("Transcript ready" in t for t in texts)
 
 
 async def test_watch_reports_failure(api_client, backend):
@@ -113,6 +117,119 @@ async def test_watch_reports_failure(api_client, backend):
 
     assert status == "failed"
     assert any("Processing failed" in m["text"] for m in bot.sent)
+
+
+async def test_watch_auto_delivers_the_media_at_downloaded(api_client, backend):
+    """instruction.txt #2: the finished file is sent to the chat automatically."""
+    bot = FakeBot()
+    video = await api_client.create_video("https://youtu.be/xyz", requested_by="telegram:7")
+    video_id = video["id"]
+
+    status = await watch_video(api_client, bot, 42, video_id, interval=0.0, timeout=5.0)
+
+    assert status == "transcribed"
+    documents = [m for m in bot.sent if m.get("document") is not None]
+    assert documents, "the media should be delivered without being asked"
+    assert documents[0]["document"] == b"fake-media-bytes"
+    assert documents[0]["chat_id"] == 42
+    # The completion notice still arrives alongside the file itself.
+    assert any("Download complete" in m["text"] for m in bot.sent)
+
+
+async def test_queued_reply_carries_the_console_link_for_an_admin(api_client, backend):
+    update = FakeUpdate(text="https://youtu.be/admin-link", user_id=999)  # admin
+    ctx, _ = _context(api_client)
+
+    await handle_link(update, ctx)
+
+    markup = update.message.replies[0]["reply_markup"]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    texts = [b.text for b in buttons]
+    # A fresh link-created video is unfiled, so the admin sees the console
+    # button only — and the video_keyboard buttons survive the merge.
+    video_id = next(iter(backend.videos))
+    assert "🛠 Go to admin" in texts
+    assert f"https://console.test/videos/{video_id}" in [b.url for b in buttons]
+    assert "Status" in texts
+    await ctx.bot_data["watchers"].cancel_all()
+
+
+async def test_queued_reply_carries_the_portal_link_for_a_filed_video(api_client, backend):
+    """A duplicate URL returns the *existing* video — one that can be filed."""
+    video = await api_client.create_video("https://youtu.be/filed", requested_by="telegram:7")
+    folder = backend.add_folder("Fieldwork")
+    backend.videos[video["id"]]["folder_id"] = folder["id"]
+
+    update = FakeUpdate(text="https://youtu.be/filed", user_id=42)
+    ctx, _ = _context(api_client)
+
+    await handle_link(update, ctx)
+
+    markup = update.message.replies[0]["reply_markup"]
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    # A video reply links to the unit's own portal page, folder or not.
+    assert f"https://portal.test/video/{video['id']}" in urls
+    # user 42 is not an admin, so no console button anywhere.
+    assert all("/videos/" not in (url or "") for url in urls)
+    await ctx.bot_data["watchers"].cancel_all()
+
+
+async def test_watch_notifies_with_the_threaded_links(api_client, backend):
+    """The reply_markup threaded into the watch lands on every notification."""
+    links = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🌐 Go to portal", url="https://portal.test/video/x")]]
+    )
+    bot = FakeBot()
+    video = await api_client.create_video("https://youtu.be/threaded", requested_by="telegram:7")
+
+    status = await watch_video(
+        api_client, bot, 42, video["id"], interval=0.0, timeout=5.0, reply_markup=links
+    )
+
+    assert status == "transcribed"
+    ready = [m for m in bot.sent if "Transcript ready" in m.get("text", "")]
+    assert ready, "the watch must reach its terminal notification"
+    assert ready[0]["reply_markup"] is links
+    downloaded = [m for m in bot.sent if "Download complete" in m.get("text", "")]
+    assert downloaded and downloaded[0]["reply_markup"] is links
+    documents = [m for m in bot.sent if m.get("document") is not None]
+    assert documents and documents[0]["reply_markup"] is links
+
+
+class BrokenMediaWatchClient:
+    """A client whose media endpoint 404s while the video itself settles."""
+
+    def __init__(self) -> None:
+        self._statuses = iter(["downloaded", "transcribed"])
+
+    async def get_video(self, video_id: str):
+        return {
+            "id": video_id,
+            "status": next(self._statuses, "transcribed"),
+            "transcripts": [],
+        }
+
+    async def get_media(self, video_id: str) -> bytes:
+        from bot.client import ApiError
+
+        raise ApiError("not_found", "Media is not available yet.", status_code=404)
+
+
+async def test_watch_survives_a_delivery_failure():
+    """A failed auto-delivery explains itself and never stops the polling."""
+    bot = FakeBot()
+    client = BrokenMediaWatchClient()
+
+    status = await watch_video(
+        client, bot, 42, "11111111-1111-1111-1111-111111111111", interval=0.0, timeout=5.0
+    )
+
+    assert status == "transcribed", "the watcher must keep polling to the end"
+    texts = [m["text"] for m in bot.sent]
+    assert any("Download complete" in t for t in texts)
+    assert any("not on disk" in t for t in texts), "the user learns why no file arrived"
+    assert any("Transcript ready" in t for t in texts), "polling continued past the failure"
+    assert not any(m.get("document") is not None for m in bot.sent)
 
 
 async def test_registry_does_not_poll_the_same_video_twice():

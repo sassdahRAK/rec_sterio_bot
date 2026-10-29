@@ -13,8 +13,10 @@ from telegram.ext import (
 from . import (
     admin,
     collect,
+    cookies,
     dataset,
     errors,
+    identity,
     links,
     media,
     merge,
@@ -44,12 +46,15 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", start.start))
     app.add_handler(CommandHandler("help", start.help_command))
     app.add_handler(CommandHandler("status", status.status_command))
+    app.add_handler(CommandHandler("whoami", identity.whoami_command))
     app.add_handler(CommandHandler("transcript", transcript.transcript_command))
     app.add_handler(CommandHandler("transcripts", transcript.transcripts_command))
     # Editing from the chat (instruction.txt #3).
     app.add_handler(CommandHandler("edit", transcript.edit_command))
     app.add_handler(CommandHandler("cancel", transcript.cancel_command))
     app.add_handler(CommandHandler("media", media.media_command))
+    # The stored mp3 — request-only, never auto-delivered.
+    app.add_handler(CommandHandler("audio", media.audio_command))
     app.add_handler(CommandHandler("merge", merge.merge_command))
     app.add_handler(CommandHandler("merges", merge.merges_command))
     app.add_handler(CommandHandler("apply", merge.apply_command))
@@ -72,7 +77,15 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("record", collect.record_command))
     app.add_handler(CommandHandler("records", collect.records_command))
 
-    # Inline buttons (merge apply / re-check / list).
+    # Per-user cookies: one-time setup so TikTok/Facebook link downloads can
+    # use the user's own session — consent first, file second.
+    app.add_handler(CommandHandler("cookies", cookies.cookies_command))
+
+    # Inline buttons (merge apply / re-check / list). The cookies and link
+    # handlers are pattern-scoped and registered first because merge's handler
+    # matches every callback — only the first matching handler in a group runs.
+    app.add_handler(CallbackQueryHandler(cookies.on_callback, pattern=r"^cookies:"))
+    app.add_handler(CallbackQueryHandler(identity.on_callback, pattern=r"^link:"))
     app.add_handler(CallbackQueryHandler(merge.on_callback))
 
     # The /collect wizard. Registered before the catch-all text handler so a
@@ -84,6 +97,17 @@ def register_handlers(app: Application) -> None:
     # check runs before the link handler and stops it when it consumed the text.
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, _text_router)
+    )
+
+    # A cookies.txt in a private chat (the /cookies flow's second step).
+    # Registered BEFORE the media catch-all: a group runs only the first
+    # matching handler, and a .txt is not in uploads' ALLOWED_SUFFIXES, so
+    # this must win the race for it.
+    app.add_handler(
+        MessageHandler(
+            filters.Document.FileExtension("txt") & filters.ChatType.PRIVATE,
+            cookies.handle_cookies_document,
+        )
     )
 
     # A media file the user sends directly — ingestion without a platform.

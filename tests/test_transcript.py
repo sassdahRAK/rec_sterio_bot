@@ -51,6 +51,23 @@ async def test_long_transcript_is_sent_as_a_document(api_client, backend):
     assert "v1" in doc["caption"]
 
 
+async def test_transcript_reply_carries_the_web_links(api_client, backend):
+    """/transcript fetches the video too, so its reply can link to both apps."""
+    video = await api_client.create_video("https://youtu.be/linked", requested_by="telegram:1")
+    backend.add_transcript(video["id"], "Linked transcript.")
+    folder = backend.add_folder("Transcript folder")
+    backend.videos[video["id"]]["folder_id"] = folder["id"]
+
+    update = FakeUpdate(user_id=999)  # admin
+    ctx = _context(api_client, args=[video["id"]])
+    await transcript_command(update, ctx)
+
+    markup = update.message.replies[0]["reply_markup"]
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    assert f"https://portal.test/video/{video['id']}" in urls
+    assert f"https://console.test/videos/{video['id']}" in urls
+
+
 async def test_transcript_404_is_reported_friendlyly(api_client, backend):
     video = await api_client.create_video("https://youtu.be/none", requested_by="telegram:1")
 

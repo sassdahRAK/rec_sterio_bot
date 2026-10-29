@@ -67,6 +67,24 @@ async def test_status_shows_progress_size_and_duration(api_client, backend):
     assert "Transcript" in text
 
 
+async def test_status_reply_carries_the_web_links_for_an_admin(api_client, backend):
+    video = await api_client.create_video("https://youtu.be/links", requested_by="telegram:1")
+    folder = backend.add_folder("Status folder")
+    backend.videos[video["id"]]["folder_id"] = folder["id"]
+
+    update = FakeUpdate(user_id=999)  # admin
+    ctx = _context(api_client, args=[video["id"]])
+
+    await status_command(update, ctx)
+
+    markup = update.message.replies[0]["reply_markup"]
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    assert f"https://portal.test/video/{video['id']}" in urls
+    assert f"https://console.test/videos/{video['id']}" in urls
+    # the pre-existing video buttons survive the merge
+    assert "Status" in [b.text for row in markup.inline_keyboard for b in row]
+
+
 async def test_status_reports_an_unknown_id(api_client, backend):
     import uuid
 

@@ -8,17 +8,19 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from telegram import Update
+from telegram import InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiClient, ApiError, ApiNetworkError
-from ..helpers import actor_for, escape_markdown, extract_url, get_client
+from ..helpers import actor_for, escape_markdown, extract_url, get_client, web_links
 from ..keyboards import video_keyboard
+from .cookies import CONSENT_REQUIRED_HINT
+from .media import deliver_media
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["WatchRegistry", "handle_link", "watch_video"]
+__all__ = ["WatchRegistry", "handle_link", "start_watch", "watch_video"]
 
 TERMINAL_STATUSES = frozenset({"transcribed", "failed", "quarantined"})
 DOWNLOAD_DONE_STATUSES = frozenset({"downloaded"})
@@ -103,10 +105,22 @@ async def watch_video(
     *,
     interval: float = 5.0,
     timeout: float = 1200.0,
+    deliver: bool = True,
+    reply_markup: InlineKeyboardMarkup | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> str:
     """Poll a video until it settles, notifying the user along the way.
+
+    ``deliver`` (the default) announces the finished download and sends the
+    file to the chat right away — the drop-a-link flow. A direct upload
+    passes False: the user already has the file, so the watch stays silent
+    until the terminal notification ("Transcript ready" or the failure
+    equivalent).
+
+    ``reply_markup`` is the web-link keyboard the starting flow computed for
+    the user who queued the video, shown under every notification (and the
+    delivered file) this watch sends.
 
     Returns the final observed status. Never raises for expected API errors.
     """
@@ -139,12 +153,18 @@ async def watch_video(
         status = str(video.get("status") or "unknown")
 
         if status in TERMINAL_STATUSES:
-            await _notify_terminal(bot, chat_id, client, video_id, video, status)
+            await _notify_terminal(bot, chat_id, client, video_id, video, status, reply_markup=reply_markup)
             return status
 
-        if status in DOWNLOAD_DONE_STATUSES and not notified_download:
+        if deliver and status in DOWNLOAD_DONE_STATUSES and not notified_download:
             notified_download = True
-            await _notify_downloaded(bot, chat_id, client, video_id, video)
+            await _notify_downloaded(bot, chat_id, client, video_id, video, reply_markup=reply_markup)
+            # instruction.txt #2: the finished file goes to the chat right away,
+            # not only on request. A delivery failure must never kill the watch.
+            try:
+                await deliver_media(bot, chat_id, client, video_id, video=video, reply_markup=reply_markup)
+            except Exception as exc:  # noqa: BLE001 - keep polling regardless
+                logger.warning("could not deliver media for %s: %s", video_id, exc)
 
         await sleep(interval)
 
@@ -166,7 +186,12 @@ async def _safe_send(bot: Any, chat_id: int, text: str, **kwargs: Any) -> None:
 
 
 async def _notify_downloaded(
-    bot: Any, chat_id: int, client: ApiClient, video_id: str, video: Mapping[str, Any]
+    bot: Any,
+    chat_id: int,
+    client: ApiClient,
+    video_id: str,
+    video: Mapping[str, Any],
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     text = (
         "✅ *Download complete*\n"
@@ -175,7 +200,7 @@ async def _notify_downloaded(
         f"Use /media {video_id} to get the file, "
         f"/transcript {video_id} to read it, or /status {video_id} for details."
     )
-    await _safe_send(bot, chat_id, text, parse_mode=ParseMode.MARKDOWN)
+    await _safe_send(bot, chat_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
 
 async def _notify_terminal(
@@ -185,6 +210,7 @@ async def _notify_terminal(
     video_id: str,
     video: Mapping[str, Any],
     status: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     if status == "failed":
         text = (
@@ -198,7 +224,52 @@ async def _notify_terminal(
             f"Transcript: {_transcript_summary(video)}\n\n"
             f"Use /transcript {video_id} to read it, or /media {video_id} for the file."
         )
-    await _safe_send(bot, chat_id, text, parse_mode=ParseMode.MARKDOWN)
+    await _safe_send(bot, chat_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+
+
+def start_watch(
+    context: ContextTypes.DEFAULT_TYPE,
+    client: ApiClient,
+    chat_id: int,
+    video_id: str,
+    *,
+    deliver: bool = True,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Register the background watch for ``video_id`` on the shared registry.
+
+    Every flow that puts a video through the pipeline — a link, a file upload,
+    an admin retry — starts its watch through here, so a video is never
+    polled twice and the poll settings live in one place. ``deliver`` is
+    passed through to ``watch_video``: False keeps a watch silent about the
+    download step, for a direct upload whose file the user already has.
+    ``reply_markup`` is the web-link keyboard computed by the starting flow,
+    shown under each notification the watch sends. Returns False when a watch
+    is already running for the video.
+    """
+    bot_data = context.bot_data or {}
+    watchers: WatchRegistry = bot_data.get("watchers")
+    if watchers is None:
+        watchers = WatchRegistry()
+        context.bot_data["watchers"] = watchers
+
+    settings = bot_data.get("settings")
+    started = watchers.start(
+        video_id,
+        watch_video(
+            client,
+            context.bot,
+            chat_id,
+            video_id,
+            interval=getattr(settings, "poll_interval_seconds", 5.0),
+            timeout=getattr(settings, "poll_timeout_seconds", 1200.0),
+            deliver=deliver,
+            reply_markup=reply_markup,
+        ),
+    )
+    if not started:
+        logger.info("already watching video %s — not starting a second watcher", video_id)
+    return started
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,6 +296,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         payload = await client.create_video(url, requested_by=actor_for(update))
     except ApiError as exc:
+        if getattr(exc, "code", "") == "consent_required":
+            # The platform needs the user's own session: point at /cookies
+            # instead of dumping the raw error envelope at them.
+            await message.reply_text(CONSENT_REQUIRED_HINT)
+            return
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
     except ApiNetworkError as exc:
@@ -238,34 +314,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    # The web-link buttons are computed once and travel with the watch, so
+    # every later notification ("Download complete", "Transcript ready", the
+    # delivered file) carries the same links as this reply.
+    links = web_links(update, context, video=payload, markup=video_keyboard(video_id))
     await message.reply_text(
         f"Queued for download — video id `{video_id}`\n"
         f"I will notify you when it is ready. Use /status {video_id} any time.",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=video_keyboard(video_id),
+        reply_markup=links,
     )
 
-    watchers: WatchRegistry = (context.bot_data or {}).get("watchers")
-    if watchers is None:
-        watchers = WatchRegistry()
-        context.bot_data["watchers"] = watchers
-
-    settings = (context.bot_data or {}).get("settings")
-    interval = getattr(settings, "poll_interval_seconds", 5.0)
-    timeout = getattr(settings, "poll_timeout_seconds", 1200.0)
-
-    chat_id = message.chat_id
-    bot = context.bot
-    started = watchers.start(
-        video_id,
-        watch_video(
-            client,
-            bot,
-            chat_id,
-            video_id,
-            interval=interval,
-            timeout=timeout,
-        ),
-    )
-    if not started:
-        logger.info("already watching video %s — not starting a second watcher", video_id)
+    start_watch(context, client, message.chat_id, video_id, reply_markup=links)

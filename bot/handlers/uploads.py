@@ -13,9 +13,9 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import actor_for, escape_markdown, format_bytes, get_client
+from ..helpers import actor_for, format_bytes, get_client, web_links
 from ..keyboards import video_keyboard
-from .links import WatchRegistry
+from .links import start_watch
 
 logger = logging.getLogger(__name__)
 
@@ -107,31 +107,16 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    links = web_links(update, context, video=video, markup=video_keyboard(video_id))
     await notice.edit_text(
         f"✅ Uploaded — video id `{video_id}`\n"
         f"Size: {format_bytes(video.get('file_size'))}  |  "
         f"Status: `{video.get('status')}`\n\n"
         f"I will notify you when the transcript is ready.",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=video_keyboard(video_id),
+        reply_markup=links,
     )
 
-    watchers: WatchRegistry = (context.bot_data or {}).get("watchers")
-    if watchers is None:
-        watchers = WatchRegistry()
-        context.bot_data["watchers"] = watchers
-
-    from .links import watch_video
-
-    settings = (context.bot_data or {}).get("settings")
-    watchers.start(
-        video_id,
-        watch_video(
-            client,
-            context.bot,
-            message.chat_id,
-            video_id,
-            interval=getattr(settings, "poll_interval_seconds", 5.0),
-            timeout=getattr(settings, "poll_timeout_seconds", 1200.0),
-        ),
-    )
+    # The user already has this file: no "Download complete" notice and no
+    # echo of the media — the transcript-ready notification is the payoff.
+    start_watch(context, client, message.chat_id, video_id, deliver=False, reply_markup=links)

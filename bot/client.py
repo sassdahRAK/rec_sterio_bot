@@ -457,6 +457,23 @@ class ApiClient:
         response = await self.request("GET", f"/videos/{video_id}/media", expect_json=False)
         return response.content
 
+    async def get_audio(
+        self,
+        video_id: str,
+        *,
+        requested_by: str | None = None,
+        format: str = "mp3",
+    ) -> bytes:
+        """The mp3 listening copy of a video — not the ASR wav."""
+        response = await self.request(
+            "GET",
+            f"/videos/{video_id}/audio",
+            params={"format": format},
+            requested_by=requested_by,
+            expect_json=False,
+        )
+        return response.content
+
     # -- dataset layer (v2) -----------------------------------------------
     # The bot authenticates as the service token, which the API treats as an
     # editor on every folder, so these can address any folder by id.
@@ -618,6 +635,116 @@ class ApiClient:
                 if isinstance(existing, dict) and existing.get("id"):
                     return existing
             raise self._to_api_error(response)
+        if response.status_code >= 400:
+            raise self._to_api_error(response)
+        return response.json() if response.content else {}
+
+    # -- per-user cookies + consent (bot-users) ----------------------------
+    # A TikTok/Facebook download often only works with a logged-in browser
+    # session, so a user can hand the bot their own cookies.txt. The consent
+    # record and the file live behind /bot-users/{telegram_id}, one per user.
+    async def get_bot_user(
+        self, telegram_id: int, *, requested_by: str | None = None
+    ) -> dict[str, Any] | None:
+        """The user's consent + cookies record, or None when there is none yet."""
+        try:
+            return await self.request(
+                "GET", f"/bot-users/{telegram_id}", requested_by=requested_by
+            )
+        except ApiError as exc:
+            if exc.status_code == 404 or exc.code == "not_found":
+                return None
+            raise
+
+    async def create_consent(
+        self,
+        telegram_id: int,
+        consent_version: str,
+        *,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the user's agreement to the given version of the consent text."""
+        return await self.request(
+            "POST",
+            f"/bot-users/{telegram_id}/consent",
+            json={"consent_version": consent_version},
+            requested_by=requested_by,
+        )
+
+    async def redeem_link(
+        self,
+        telegram_id: int,
+        code: str,
+        *,
+        confirm: bool,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Redeem a console account link code, in two phases.
+
+        ``confirm=False`` is the dry-run: the backend only reports which
+        console account the code points at (``account_email``), no link is
+        made. ``confirm=True`` makes the link and returns the full identity
+        (``account_email``, ``account_name``, ``account_role``). Errors: 401
+        ``unauthorized`` when the code is wrong/expired/already used, 409
+        ``already_linked`` when this Telegram account is linked elsewhere.
+        """
+        return await self.request(
+            "POST",
+            f"/bot-users/{telegram_id}/link",
+            json={"code": code, "confirm": confirm},
+            requested_by=requested_by,
+        )
+
+    async def get_admin_ids(self) -> list[int]:
+        """Telegram ids of linked, ACTIVE console accounts with role=admin.
+
+        Errors propagate: the admin-ids cache's ``refresh`` swallows them and
+        keeps the previous set.
+        """
+        data = await self.request("GET", "/bot-users/admin-ids")
+        return data.get("ids") or []
+
+    async def delete_bot_user(
+        self, telegram_id: int, *, requested_by: str | None = None
+    ) -> None:
+        """Withdraw: delete the cookies file and the consent record."""
+        await self.request(
+            "DELETE", f"/bot-users/{telegram_id}", requested_by=requested_by, expect_json=False
+        )
+
+    async def upload_cookies(
+        self,
+        telegram_id: int,
+        content: bytes,
+        filename: str = "cookies.txt",
+        *,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a cookies.txt as multipart to the user's bot-user record.
+
+        Mirrors :meth:`upload_video`: multipart with its own retry loop and
+        the long upload timeout, because the body is a real file.
+        """
+        url = f"{self.base_url}/bot-users/{telegram_id}/cookies"
+        attempt = 0
+        while True:
+            try:
+                response = await self._client.post(
+                    url,
+                    files={"file": (filename, content, "text/plain")},
+                    data={},
+                    headers=self._headers(requested_by),
+                    timeout=self._upload_timeout,
+                )
+                break
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                attempt += 1
+                if attempt > self._max_retries:
+                    raise ApiNetworkError(
+                        str(exc) or type(exc).__name__, exc
+                    ) from exc
+                await self._sleep(self._backoff * (2 ** (attempt - 1)))
+
         if response.status_code >= 400:
             raise self._to_api_error(response)
         return response.json() if response.content else {}

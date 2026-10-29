@@ -186,6 +186,46 @@ async def test_cleaned_only_returns_cleaned_units(api_client, backend):
     assert "Raw unit" not in text
 
 
+# ------------------------------------------------------------ web link buttons
+
+
+async def test_folder_reply_opens_the_portal_folder_page(api_client, backend):
+    folder = backend.add_folder("Linkable")
+
+    update = FakeUpdate(user_id=ADMIN)
+    await folder_command(update, _admin_ctx(api_client, args=[folder["id"]]))
+
+    markup = update.message.replies[0]["reply_markup"]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert [b.text for b in buttons] == ["🌐 Open folder"]
+    assert buttons[0].url == f"https://portal.test/folder/{folder['id']}"
+
+
+async def test_cards_reply_opens_the_folder_page_when_scoped(api_client, backend):
+    folder = backend.add_folder("Scoped")
+    video = await api_client.create_video("https://youtu.be/scoped", requested_by="telegram:1")
+    backend.file_video(video["id"], folder_id=folder["id"], title="Scoped unit")
+
+    update = FakeUpdate(user_id=ADMIN)
+    await cards_command(update, _admin_ctx(api_client, args=[folder["id"]]))
+
+    markup = update.message.replies[0]["reply_markup"]
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    assert f"https://portal.test/folder/{folder['id']}" in urls
+    # The console has no per-folder route, so no console button for admins.
+    assert all("/videos/" not in (url or "") for url in urls)
+
+
+async def test_cards_across_all_folders_get_no_link_buttons(api_client, backend):
+    video = await api_client.create_video("https://youtu.be/unscoped", requested_by="telegram:1")
+    backend.file_video(video["id"], title="Unscoped unit")
+
+    update = FakeUpdate(user_id=ADMIN)
+    await cards_command(update, _admin_ctx(api_client))
+
+    assert update.message.replies[0]["reply_markup"] is None
+
+
 # ---------------------------------------------------------------- mkdir
 
 
