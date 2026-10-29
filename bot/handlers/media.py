@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
 from ..helpers import (
+    BOT_NOT_READY,
     escape_markdown,
     format_bytes,
     get_client,
@@ -359,8 +360,8 @@ async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     await message.reply_text(f"Fetching the media for `{video_id}`…", parse_mode=ParseMode.MARKDOWN)
@@ -398,8 +399,8 @@ async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     await message.reply_text(f"Fetching the audio for `{video_id}`…", parse_mode=ParseMode.MARKDOWN)
@@ -445,4 +446,4 @@ async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     except Exception as exc:  # noqa: BLE001 - a failed upload must not crash the bot
         logger.warning("could not upload the audio for %s: %s", video_id, exc)
-        await message.reply_text(f"Could not upload the file: {exc}")
+        await message.reply_text("Could not upload the file. Please try again in a moment.")

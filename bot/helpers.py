@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "URL_RE",
+    "BOT_NOT_READY",
     "AdminIdsCache",
     "actor_for",
     "escape_markdown",
@@ -38,6 +39,11 @@ __all__ = [
 URL_RE = re.compile(
     r"https?://[^\s<>\"'()\[\]]+", re.IGNORECASE
 )
+
+#: Shown when the backend is not reachable yet. One constant so the wording
+#: cannot drift between handlers, and so no handler ever interpolates the raw
+#: exception into user-facing text.
+BOT_NOT_READY = "The bot is still starting up — try again in a moment."
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -354,7 +360,7 @@ def user_message_for(exc: BaseException) -> str:
         return exc.user_message()
     if isinstance(exc, ApiNetworkError):
         return exc.user_message()
-    return f"[unexpected error] {exc.__class__.__name__}: {exc}"
+    return "Something went wrong on our side — please try again in a moment."
 
 
 def is_uuid(value: str | None) -> bool:

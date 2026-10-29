@@ -10,7 +10,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import format_video_status, get_client, is_uuid, web_links
+from ..helpers import BOT_NOT_READY, format_video_status, get_client, is_uuid, web_links
 from ..keyboards import video_keyboard
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:

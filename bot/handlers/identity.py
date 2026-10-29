@@ -19,7 +19,7 @@ from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
 from ..config import get_settings
-from ..helpers import _admin_cache_ids, actor_for, get_client
+from ..helpers import BOT_NOT_READY, _admin_cache_ids, actor_for, get_client
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,8 @@ async def handle_start_link(
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -135,8 +135,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await query.answer(text=str(exc)[:180], show_alert=True)
+    except RuntimeError:
+        await query.answer(
+            text="The link could not be completed — tap Confirm again in a moment.",
+            show_alert=True,
+        )
         return
 
     try:
@@ -194,8 +197,8 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        lines.append(f"[bot not ready] {exc}")
+    except RuntimeError:
+        lines.append(BOT_NOT_READY)
         await message.reply_text("\n".join(lines))
         return
 

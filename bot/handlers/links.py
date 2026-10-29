@@ -13,7 +13,14 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiClient, ApiError, ApiNetworkError
-from ..helpers import actor_for, escape_markdown, extract_url, get_client, web_links
+from ..helpers import (
+    BOT_NOT_READY,
+    actor_for,
+    escape_markdown,
+    extract_url,
+    get_client,
+    web_links,
+)
 from ..keyboards import video_keyboard
 from .cookies import CONSENT_REQUIRED_HINT
 from .media import deliver_media
@@ -289,8 +296,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:

@@ -26,7 +26,7 @@ from telegram.ext import (
 )
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import actor_for, escape_markdown, extract_url, get_client
+from ..helpers import BOT_NOT_READY, actor_for, escape_markdown, extract_url, get_client
 from .cookies import CONSENT_REQUIRED_HINT
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ __all__ = ["build_conversation", "record_command", "records_command"]
 
 USAGE = (
     "Usage: `/collect` then paste the link.\n"
-    "`/record <video id>` — show one item's TvNa record\n"
+    "`/record <video id>` — show one item's RecSterio record\n"
     "`/records` — the most recent records"
 )
 
@@ -145,7 +145,7 @@ async def start_collect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     _clear(context)
     _state(context)  # create a fresh draft
     await message.reply_text(
-        "New TvNa record.\n\n"
+        "New RecSterio record.\n\n"
         "Paste the TikTok, Facebook or YouTube link for this item. "
         "/cancel stops here.",
     )
@@ -167,8 +167,8 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return ConversationHandler.END
 
     try:
@@ -262,8 +262,8 @@ async def _save(
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         _clear(context)
         return ConversationHandler.END
 
@@ -359,8 +359,8 @@ async def record_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     video_id = args[0].strip()
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -386,8 +386,8 @@ async def records_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -403,11 +403,11 @@ async def records_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     recorded = [v for v in items if isinstance(v, Mapping) and v.get("tvna_id")]
     if not recorded:
         await message.reply_text(
-            "No TvNa records yet. Start one with /collect.",
+            "No RecSterio records yet. Start one with /collect.",
         )
         return
 
-    lines = ["*Recent TvNa records*"]
+    lines = ["*Recent RecSterio records*"]
     for video in recorded:
         lines.append(
             f"- `{video.get('tvna_id')}` · {escape_markdown(str(video.get('location_tag') or '—'))}"

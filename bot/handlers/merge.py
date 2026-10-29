@@ -18,7 +18,14 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiClient, ApiError, ApiNetworkError
-from ..helpers import actor_for, escape_markdown, get_client, is_uuid, web_links
+from ..helpers import (
+    BOT_NOT_READY,
+    actor_for,
+    escape_markdown,
+    get_client,
+    is_uuid,
+    web_links,
+)
 from ..inflight import get_inflight
 from ..keyboards import merge_keyboard, merge_list_keyboard
 from . import media as media_handler
@@ -355,8 +362,8 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -460,8 +467,8 @@ async def merges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -531,8 +538,8 @@ async def apply_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -568,8 +575,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await query.answer(text=str(exc)[:180], show_alert=True)
+    except RuntimeError:
+        await query.answer(
+            text="That did not work — please try again.", show_alert=True
+        )
         return
 
     # A double-tapped button sends two callbacks; the second must not fetch and

@@ -25,6 +25,7 @@ from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
 from ..helpers import (
+    BOT_NOT_READY,
     actor_for,
     escape_markdown,
     format_bytes,
@@ -168,8 +169,8 @@ async def folders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     payload = await _call(
@@ -211,8 +212,8 @@ async def folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     node = await _call(update, context, client.get_folder(folder_id))
@@ -297,8 +298,8 @@ async def _list_cards(
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     # `cleaned` is a *filter* on the API, not a default: omitting it returns
@@ -374,8 +375,8 @@ async def mkdir_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     node = await _call(
@@ -438,8 +439,8 @@ async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     share = await _call(
@@ -523,8 +524,8 @@ async def passcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     passcode = await _call(
@@ -591,8 +592,8 @@ async def zip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     archive = await _call(update, context, client.download_folder_zip(folder_id))
@@ -601,7 +602,7 @@ async def zip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not archive:
         await message.reply_text(
-            "This folder has no downloadable media yet (409 nothing_to_export)."
+            "This folder has no downloadable media yet."
         )
         return
 

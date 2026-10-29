@@ -36,9 +36,9 @@ WELCOME = (
     "/apply <merge id> — make a merged transcript the current version\n"
     "/cookies — one-time setup for TikTok/Facebook link downloads\n"
     "/help — this message\n\n"
-    "*TvNa records* (instruction schema: ID, platform, author, caption, place…)\n"
+    "*RecSterio records* (each record keeps its ID, platform, author and date)\n"
     "/collect — guided wizard: paste the link, name the place, save the record\n"
-    "/record <video id> — show one item's TvNa record\n"
+    "/record <video id> — show one item's RecSterio record\n"
     "/records — the most recent records\n\n"
     "*Dataset* (admins only — the bot's token can see private folders)\n"
     "/folders [parent id] — the folder tree, with visibility and video counts\n"
@@ -85,7 +85,7 @@ async def _reply_video(update: Update, context: ContextTypes.DEFAULT_TYPE, video
         client = None
     if client is None:
         await message.reply_text(
-            f"Video `{video_id}` — (backend unavailable)", parse_mode=ParseMode.MARKDOWN
+            f"Video `{video_id}` — the bot is still starting up; try again in a moment.", parse_mode=ParseMode.MARKDOWN
         )
         return
     try:

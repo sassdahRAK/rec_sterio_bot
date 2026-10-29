@@ -19,7 +19,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     error = context.error
     logger.error("unhandled error while processing update: %s", error, exc_info=error)
 
-    text = "Something went wrong on my side — please try again."
+    text = "Something went wrong on our side — please try again."
     parse_mode = None
     if isinstance(error, (ApiError, ApiNetworkError)):
         # ``user_message`` is already Markdown-escaped; render it as such.
@@ -27,7 +27,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode = ParseMode.MARKDOWN
     elif error is not None:
         # An arbitrary exception's text is never handed to the entity parser.
-        text = f"[unexpected error] {error.__class__.__name__}: {error}"
+        text = "Something went wrong on our side — please try again in a moment."
 
     try:
         message = getattr(update, "effective_message", None)

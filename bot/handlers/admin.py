@@ -15,7 +15,14 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import escape_markdown, get_client, is_admin, is_uuid, web_links
+from ..helpers import (
+    BOT_NOT_READY,
+    escape_markdown,
+    get_client,
+    is_admin,
+    is_uuid,
+    web_links,
+)
 from ..keyboards import jobs_keyboard
 from .links import start_watch
 
@@ -37,8 +44,8 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     status_filter = None
@@ -110,8 +117,8 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -174,8 +181,8 @@ async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:

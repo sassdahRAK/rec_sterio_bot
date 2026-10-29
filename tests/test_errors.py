@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from bot.client import ApiError, ApiNetworkError, escape_markdown
 from bot.config import Settings
+from bot.handlers.cookies import cookies_command
 from bot.handlers.errors import error_handler
 from bot.handlers.links import handle_link
+from bot.handlers.media import audio_command, media_command
 from bot.handlers.status import status_command
+from bot.helpers import BOT_NOT_READY
 from tests.conftest import FakeContext, FakeUpdate
 
 
@@ -95,6 +98,46 @@ async def test_global_error_handler_handles_network_errors():
     assert "network_error" in update.message.replies[0]["text"].replace("\\", "")
 
 
+async def test_not_ready_path_shows_the_shared_constant_not_the_exception():
+    """A missing API client must not leak the internal RuntimeError text."""
+    import uuid
+
+    update = FakeUpdate(user_id=1)
+    ctx = FakeContext(args=[str(uuid.uuid4())])  # no "api" in bot_data
+
+    await media_command(update, ctx)
+
+    text = update.message.replies[0]["text"]
+    assert text == BOT_NOT_READY
+    assert "API client is not initialised" not in text
+    assert "not_ready" not in text
+    assert "bot not ready" not in text
+
+
+async def test_not_ready_audio_command_shows_the_shared_constant():
+    import uuid
+
+    update = FakeUpdate(user_id=1)
+    ctx = FakeContext(args=[str(uuid.uuid4())])  # no "api" in bot_data
+
+    await audio_command(update, ctx)
+
+    text = update.message.replies[0]["text"]
+    assert text == BOT_NOT_READY
+    assert "API client is not initialised" not in text
+
+
+async def test_not_ready_cookies_command_shows_the_shared_constant():
+    update = FakeUpdate(user_id=1)
+    ctx = FakeContext()  # no "api" in bot_data
+
+    await cookies_command(update, ctx)
+
+    text = update.message.replies[0]["text"]
+    assert text == BOT_NOT_READY
+    assert "API client is not initialised" not in text
+
+
 async def test_global_error_handler_handles_unexpected_errors():
     update = FakeUpdate(text="boom")
     ctx = FakeContext()
@@ -102,4 +145,6 @@ async def test_global_error_handler_handles_unexpected_errors():
 
     await error_handler(update, ctx)
 
-    assert "kaboom" in update.message.replies[0]["text"]
+    text = update.message.replies[0]["text"]
+    assert text == "Something went wrong on our side — please try again in a moment."
+    assert "kaboom" not in text

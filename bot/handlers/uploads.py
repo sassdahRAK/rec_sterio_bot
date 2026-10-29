@@ -13,7 +13,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import actor_for, format_bytes, get_client, web_links
+from ..helpers import BOT_NOT_READY, actor_for, format_bytes, get_client, web_links
 from ..keyboards import video_keyboard
 from .links import start_watch
 
@@ -72,8 +72,8 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     notice = await message.reply_text(f"Uploading {filename}…")

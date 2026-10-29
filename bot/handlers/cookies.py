@@ -17,7 +17,13 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import actor_for, format_bytes, get_client, get_settings_or_default
+from ..helpers import (
+    BOT_NOT_READY,
+    actor_for,
+    format_bytes,
+    get_client,
+    get_settings_or_default,
+)
 from ..keyboards import cookies_keyboard
 
 logger = logging.getLogger(__name__)
@@ -107,8 +113,8 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[bot not ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     try:
@@ -149,8 +155,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await query.answer(text=str(exc)[:180], show_alert=True)
+    except RuntimeError:
+        await query.answer(text=BOT_NOT_READY, show_alert=True)
         return
 
     if action == "agree":
@@ -240,8 +246,8 @@ async def handle_cookies_document(
 
     try:
         client = get_client(context)
-    except RuntimeError as exc:
-        await message.reply_text(f"[not_ready] {exc}")
+    except RuntimeError:
+        await message.reply_text(BOT_NOT_READY)
         return
 
     notice = await message.reply_text("Receiving your cookies file…")
