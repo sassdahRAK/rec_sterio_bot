@@ -31,7 +31,7 @@ WELCOME = (
     "and lets you fix mistakes, so the clip stays useful long after the post "
     "disappears.\n\n"
     "*Quick start*\n"
-    "• Paste a link: I download it and start transcribing\n"
+    "• Paste a link. I download it and start transcribing.\n"
     "• /collect: save a clip with where it was filmed, how it was found and why "
     "it matters\n"
     "• /cookies: one-time setup so TikTok and Facebook links work with your own "
