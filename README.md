@@ -33,6 +33,28 @@ code and never touches the database.
 Admins are the Telegram user ids listed in `ADMIN_TELEGRAM_IDS`. A non-admin
 gets a "not authorised" message and **no backend request is made**.
 
+## Bot profile
+
+`scripts/telegram_profile.py` is the source of truth for the text Telegram
+shows outside a chat: the description (before Start), the short description,
+and the command menu. Telegram stores those on its servers, so a redeploy or a
+new token does not carry them; this file does. Edit the constants there, then
+sync:
+
+```bash
+cd recsterio/bot
+.venv/bin/python -m scripts.telegram_profile --check   # diff only; exit 1 on drift
+.venv/bin/python -m scripts.telegram_profile           # diff, then write changes
+.venv/bin/python -m scripts.telegram_profile --dry-run # print, no network
+```
+
+Only fields that differ are written, and every write is validated first for
+Telegram's length limits and the house wording rules. The command list is
+checked against the handlers registered in `bot.handlers`: a listed command
+with no handler fails, while registered admin/dataset commands that are
+deliberately hidden only produce a warning. This is an operator tool, not part
+of the Docker entrypoint.
+
 ## TvNa collection schema
 
 `/collect` fills the schema the TvNa platform requires. Only two fields need a
