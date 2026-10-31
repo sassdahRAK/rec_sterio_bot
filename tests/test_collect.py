@@ -25,6 +25,9 @@ def seed(backend):
         "status": "pending",
         "progress": 0,
         "transcripts": [],
+        # The wizard runs as the default test user (42); content routes are
+        # owner-only, so the seeded unit belongs to that same user.
+        "created_by": "telegram:42",
         "author_handle": "@chewbash",
         "date_posted": "2026-09-14",
         "caption": "Chew & Bash is the best late-night spot in Phnom Penh",

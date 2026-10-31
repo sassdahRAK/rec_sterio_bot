@@ -137,6 +137,41 @@ async def test_admin_retry_starts_a_watch_that_delivers_the_media(api_client, ba
     assert backend.telegram_links[0]["file_id"].startswith("file-")
 
 
+async def test_admin_retry_stays_on_the_service_identity_end_to_end(api_client, backend):
+    """The admin gate is the authorization: /retry and the watch it starts must
+    never send X-Requested-By, or a video the admin does not own would be
+    refused after the backend's ownership change."""
+    video = await api_client.create_video("https://youtu.be/x", requested_by="telegram:1")
+    bot = FakeBot()
+    ctx = FakeContext(
+        args=[video["id"]],
+        bot_data={"api": api_client, "settings": _fast_settings()},
+        bot=bot,
+    )
+    update = FakeUpdate(user_id=999)  # admin who does not own the video
+
+    await retry_command(update, ctx)
+
+    watchers = ctx.bot_data["watchers"]
+    for _ in range(500):
+        if not watchers.is_watching(video["id"]):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("the watch started by /retry did not settle")
+
+    documents = [m for m in bot.sent if m.get("document") is not None]
+    assert documents, "the service identity still delivers the media"
+    touched = [
+        r for r in backend.requests
+        if r["path"].startswith(f"/api/v1/videos/{video['id']}")
+    ]
+    assert touched, "the retry path must call the video routes"
+    assert all(r["requested_by"] is None for r in touched), (
+        "/retry and its watch must stay on the service identity throughout"
+    )
+
+
 async def test_admin_retry_threads_the_console_link_into_the_watch(api_client, backend):
     """/retry computes the link buttons once: the reply gets them and so does
     every notification the background watch later sends."""

@@ -19,6 +19,9 @@ def wired(api_client, backend):
         "title": "Clip",
         "status": "transcribed",
         "progress": 100,
+        # The default test update acts as user 42, and content routes are now
+        # owner-only, so the unit belongs to that same user.
+        "created_by": "telegram:42",
         "transcripts": [
             {
                 "id": "tr-1",

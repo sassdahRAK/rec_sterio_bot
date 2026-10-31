@@ -177,12 +177,12 @@ async def test_agree_button_maps_version_mismatch(api_client, backend):
     backend.fail_next = (
         422,
         "version_mismatch",
-        "The consent text has changed — run /cookies again.",
+        "The consent text has changed. Run /cookies again.",
     )
     update = CallbackUpdate("cookies:agree")
     await on_callback(update, FakeContext(bot_data={"api": api_client}))
 
-    assert "run /cookies again" in update.callback_query.edits[-1]["text"]
+    assert "Run /cookies again" in update.callback_query.edits[-1]["text"]
 
 
 async def test_agree_button_gets_mismatch_from_a_changed_backend_version(
@@ -192,7 +192,7 @@ async def test_agree_button_gets_mismatch_from_a_changed_backend_version(
     update = CallbackUpdate("cookies:agree")
     await on_callback(update, FakeContext(bot_data={"api": api_client}))
 
-    assert "run /cookies again" in update.callback_query.edits[-1]["text"]
+    assert "Run /cookies again" in update.callback_query.edits[-1]["text"]
     assert backend.bot_users == {}, "a stale agreement must not be recorded"
 
 

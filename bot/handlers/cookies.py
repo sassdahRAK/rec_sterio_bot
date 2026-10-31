@@ -47,7 +47,7 @@ CONSENT_VERSION = "2026-10-28.1"
 CONSENT_TEXT = (
     "COOKIES CONSENT\n"
     "\n"
-    "Your cookies file is used ONLY for your own downloads — never for anyone else's.\n"
+    "Your cookies file is used ONLY for your own downloads, never for anyone else's.\n"
     "\n"
     "By tapping \"I agree\" you confirm that:\n"
     "1. The browser account the cookies come from is yours.\n"
@@ -60,7 +60,7 @@ CONSENT_TEXT = (
     "(owner-only) permissions, is never committed to any repository and is "
     "never shown to anyone.\n"
     "\n"
-    "Withdraw any time via /cookies → \"Remove my data\" — the file and your "
+    "Withdraw any time via /cookies → \"Remove my data\". The file and your "
     "consent record are deleted immediately."
 )
 
@@ -68,11 +68,11 @@ CONSENT_TEXT = (
 #: (a plain link message, or the /collect wizard's URL step).
 CONSENT_REQUIRED_HINT = (
     "This platform needs your own cookies first. Run /cookies in a private "
-    "chat with me, tap I agree, then send your cookies.txt — then this link "
+    "chat with me, tap I agree, then send your cookies.txt, and this link "
     "will download."
 )
 
-_NOT_PRIVATE = "Cookies are personal — message me privately to set them up."
+_NOT_PRIVATE = "Cookies are personal, so message me privately to set them up."
 
 
 def _status_line(record: Mapping[str, Any] | None) -> str:
@@ -101,7 +101,7 @@ async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if user is None:
         await message.reply_text(
-            "[unknown_user] I could not tell who is asking — please try again."
+            "[unknown_user] I could not tell who is asking, so please try again."
         )
         return
 
@@ -167,7 +167,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except ApiError as exc:
             if exc.code == "version_mismatch":
                 await query.edit_message_text(
-                    "The consent text has changed — run /cookies again."
+                    "The consent text has changed. Run /cookies again."
                 )
             else:
                 await query.edit_message_text(
@@ -227,7 +227,7 @@ async def handle_cookies_document(
     uid = getattr(user, "id", None)
     if uid is None:
         await message.reply_text(
-            "[unknown_user] I could not tell who sent this — please try again."
+            "[unknown_user] I could not tell who sent this, so please try again."
         )
         return
 

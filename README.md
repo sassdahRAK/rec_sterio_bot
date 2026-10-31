@@ -107,7 +107,13 @@ API), so local development sets these to the Mac's IP — then the "Go to portal
 button opens the portal on the operator's phone, on the same Wi-Fi. The Vite dev
 servers bind `0.0.0.0` for exactly this (`host: true` in both `vite.config.ts`).
 
-"Go to portal" points at the portal's per-video page (`/video/<id>`); admins
+"Go to portal" points at the portal's per-video page (`/video/<id>?t=<jwt>`).
+The `t` token is a signed, 7-day, single-video token the bot fetches from
+`POST /videos/{id}/portal-link`; it lets a browser visitor open an **unfiled**
+unit, which is not otherwise visible. The signing secret stays in the backend —
+the bot never holds it. When the mint call fails (older backend, transient
+outage) the link falls back to the bare `/video/<id>` page rather than being
+dropped, and a one-time warning is logged. Admins
 also get "Go to admin" for the console's per-video page. That portal page is
 also what a `/media` reply links to — as a button *and* as a spelled-out URL —
 when the file is too large for Telegram (a bot may upload at most 50 MB) or the

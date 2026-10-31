@@ -9,8 +9,11 @@ dropped: Telegram rejects such a URL and fails the whole message.
 
 from __future__ import annotations
 
+import pytest
+
 from bot.config import Settings
-from bot.helpers import portal_button, web_links
+from bot.handlers.status import status_command
+from bot.helpers import portal_button, portal_token_for, portal_url, web_links
 from bot.keyboards import video_keyboard
 from tests.conftest import FakeContext, FakeUpdate
 
@@ -210,3 +213,230 @@ def test_trailing_slashes_and_a_console_subpath_shape_the_urls_correctly():
     assert f"https://portal.example/video/{VID}" in urls
     assert f"https://console.example/console/videos/{VID}" in urls
     assert all("//video" not in (url or "") for url in urls), "no doubled slash"
+
+
+# --------------------------------------------------------- signed portal token
+# An unfiled unit is invisible to a browser visitor, so a reply's portal link
+# carries a backend-minted ?t= token. The bot keeps no signing secret: when the
+# mint call fails it degrades to the bare page instead of dropping the button.
+
+
+async def test_the_portal_button_carries_the_backend_token(api_client, backend):
+    video = await api_client.create_video("https://youtu.be/token")
+    vid = video["id"]
+
+    portal = await portal_token_for(
+        api_client, vid, requested_by=f"telegram:{NON_ADMIN}"
+    )
+    markup = web_links(
+        FakeUpdate(user_id=NON_ADMIN),
+        _context(),
+        video={"id": vid},
+        token=portal.token,
+        allow_portal=portal.linkable(confirmed=True),
+    )
+
+    assert portal.token == f"tkn-{vid}"
+    assert _buttons(markup)[0].url == f"https://portal.test/video/{vid}?t=tkn-{vid}"
+
+
+def test_portal_url_carries_the_token_too():
+    """The spelled-out link in the oversized-file notice needs the token."""
+    settings = Settings(
+        telegram_bot_token="t",
+        bot_api_token="t",
+        portal_frontend_url="https://portal.test",
+    )
+
+    assert (
+        portal_url(VID, settings, token="abc")
+        == f"https://portal.test/video/{VID}?t=abc"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        (500, "internal_error", "boom"),
+        (404, "not_found", "gone"),
+    ],
+)
+async def test_a_failed_token_call_still_yields_the_bare_portal_url(
+    api_client, backend, failure
+):
+    video = await api_client.create_video(f"https://youtu.be/fail-{failure[0]}")
+    vid = video["id"]
+    backend.portal_link_failure = failure
+
+    portal = await portal_token_for(
+        api_client, vid, requested_by=f"telegram:{NON_ADMIN}"
+    )
+
+    assert portal.token is None
+    assert portal.forbidden is False, "an infrastructure failure is not a 403"
+    markup = web_links(
+        FakeUpdate(user_id=NON_ADMIN),
+        _context(),
+        video_id=vid,
+        token=portal.token,
+        allow_portal=portal.linkable(confirmed=True),
+    )
+    assert _buttons(markup)[0].url == f"https://portal.test/video/{vid}"
+
+
+async def test_a_loopback_portal_url_is_dropped_even_with_a_token(api_client, backend):
+    video = await api_client.create_video("https://youtu.be/loopback")
+    vid = video["id"]
+    portal = await portal_token_for(
+        api_client, vid, requested_by=f"telegram:{NON_ADMIN}"
+    )
+    assert portal.token
+
+    markup = web_links(
+        FakeUpdate(user_id=NON_ADMIN),
+        _context(portal="http://localhost:5174"),
+        video_id=vid,
+        token=portal.token,
+        allow_portal=portal.linkable(confirmed=True),
+    )
+
+    assert markup is None
+
+
+async def test_the_token_is_requested_once_per_reply(api_client, backend):
+    """One mint per reply, however long the message is — not per character."""
+    video = await api_client.create_video(
+        "https://youtu.be/once", requested_by=f"telegram:{NON_ADMIN}"
+    )
+    vid = video["id"]
+    backend.file_video(vid)
+    settings = Settings(
+        telegram_bot_token="t",
+        bot_api_token="test-service-token",
+        bot_api_base_url="http://testserver/api/v1",
+        admin_telegram_ids="999",
+        portal_frontend_url="https://portal.test",
+        admin_frontend_url="https://console.test",
+    )
+    context = FakeContext(bot_data={"settings": settings, "api": api_client})
+    context.args = [vid]
+    update = FakeUpdate(user_id=NON_ADMIN)
+
+    await status_command(update, context)
+
+    calls = [
+        call
+        for call in backend.requests
+        if call["path"].endswith(f"/videos/{vid}/portal-link")
+    ]
+    assert len(calls) == 1
+    url = update.message.replies[-1]["reply_markup"].inline_keyboard[-1][0].url
+    assert url == f"https://portal.test/video/{vid}?t=tkn-{vid}"
+
+
+# ------------------------------------------------- fail closed on a backend 403
+# The portal-link endpoint evaluates the END USER's access when the bot sends
+# X-Requested-By. A 403 means no button and no bare URL; an infrastructure
+# failure keeps the bare page only because the video read for that same user
+# already vouched for access.
+
+
+def _api_context(api_client):
+    settings = Settings(
+        telegram_bot_token="t",
+        bot_api_token="test-service-token",
+        bot_api_base_url="http://testserver/api/v1",
+        admin_telegram_ids="999",
+        portal_frontend_url="https://portal.test",
+        admin_frontend_url="https://console.test",
+    )
+    return FakeContext(bot_data={"settings": settings, "api": api_client})
+
+
+async def _run_status(api_client, video_id, user_id=NON_ADMIN):
+    context = _api_context(api_client)
+    context.args = [video_id]
+    update = FakeUpdate(user_id=user_id)
+    await status_command(update, context)
+    return update
+
+
+def _reply_urls(update) -> list[str]:
+    markup = update.message.replies[-1]["reply_markup"]
+    if markup is None:
+        return []
+    return [b.url for row in markup.inline_keyboard for b in row if b.url]
+
+
+def _portal_mints(backend, video_id):
+    return [
+        call
+        for call in backend.requests
+        if call["path"].endswith(f"/videos/{video_id}/portal-link")
+    ]
+
+
+async def test_a_forbidden_user_gets_no_portal_button_at_all(api_client, backend):
+    """A 403 is about rights, not availability: the page would refuse them."""
+    # Owned by the reader: the ownership guard refuses any other unit, and
+    # these tests are about the portal-token decision, not that refusal.
+    video = await api_client.create_video(
+        "https://youtu.be/denied", requested_by=f"telegram:{NON_ADMIN}"
+    )
+    vid = video["id"]
+    backend.file_video(vid)
+    backend.portal_link_denied.add(f"telegram:{NON_ADMIN}")
+
+    update = await _run_status(api_client, vid)
+
+    urls = _reply_urls(update)
+    assert all("portal.test" not in url for url in urls), urls
+    # The refusal only happens when the identity actually rides along; dropping
+    # requested_by would let the fake mint a token and the button reappear.
+    mints = _portal_mints(backend, vid)
+    assert len(mints) == 1
+    assert mints[0]["requested_by"] == f"telegram:{NON_ADMIN}"
+
+
+async def test_a_permitted_user_gets_a_signed_portal_link(api_client, backend):
+    video = await api_client.create_video(
+        "https://youtu.be/allowed", requested_by=f"telegram:{NON_ADMIN}"
+    )
+    vid = video["id"]
+    backend.file_video(vid)
+
+    update = await _run_status(api_client, vid)
+
+    assert (
+        f"https://portal.test/video/{vid}?t=tkn-{vid}" in _reply_urls(update)
+    )
+    mints = _portal_mints(backend, vid)
+    assert mints and mints[0]["requested_by"] == f"telegram:{NON_ADMIN}"
+    reads = [
+        call
+        for call in backend.requests
+        if call["method"] == "GET" and call["path"] == f"/api/v1/videos/{vid}"
+    ]
+    assert reads and all(
+        call["requested_by"] == f"telegram:{NON_ADMIN}" for call in reads
+    ), "the video must be read as the same end user"
+
+
+async def test_an_infrastructure_failure_keeps_the_bare_url_when_access_is_known(
+    api_client, backend
+):
+    """The 500 is not a rights answer, and the video read proved access."""
+    video = await api_client.create_video(
+        "https://youtu.be/outage", requested_by=f"telegram:{NON_ADMIN}"
+    )
+    vid = video["id"]
+    backend.file_video(vid)
+    backend.portal_link_failure = (500, "internal_error", "boom")
+
+    update = await _run_status(api_client, vid)
+
+    urls = _reply_urls(update)
+    assert f"https://portal.test/video/{vid}" in urls
+    assert all("?t=" not in url for url in urls)
+    mints = _portal_mints(backend, vid)
+    assert mints and mints[0]["requested_by"] == f"telegram:{NON_ADMIN}"

@@ -315,28 +315,71 @@ class ApiClient:
     async def get_video(self, video_id: str, *, requested_by: str | None = None) -> dict[str, Any]:
         return await self.request("GET", f"/videos/{video_id}", requested_by=requested_by)
 
+    async def get_portal_link(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        """Mint the signed 7-day token behind a video's portal link.
+
+        An unfiled unit is not publicly visible, so the ``/video/<id>`` URL a
+        reply carries needs a per-video token; the backend holds the signing
+        key and only ever hands back ``{token, expires_at, path}``. The bot
+        keeps no secret of its own — a failed call degrades to the bare page
+        (see ``helpers.portal_token_for``).
+
+        *requested_by* is the end user's ``telegram:<uid>``. The endpoint
+        evaluates that user's access to the video only when the
+        ``X-Requested-By`` header carries it; without it the shared service
+        token would mint a link for any id handed in.
+        """
+        return await self.request(
+            "POST", f"/videos/{video_id}/portal-link", requested_by=requested_by
+        )
+
     async def list_videos(
-        self, params: Mapping[str, Any] | None = None
+        self,
+        params: Mapping[str, Any] | None = None,
+        *,
+        requested_by: str | None = None,
     ) -> dict[str, Any]:
         """One page of the video library (`{items, total, page, page_size}`)."""
-        return await self.request("GET", "/videos", params=params)
+        return await self.request(
+            "GET", "/videos", params=params, requested_by=requested_by
+        )
 
-    async def delete_video(self, video_id: str) -> None:
-        await self.request("DELETE", f"/videos/{video_id}", expect_json=False)
+    async def delete_video(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> None:
+        await self.request(
+            "DELETE", f"/videos/{video_id}", requested_by=requested_by, expect_json=False
+        )
 
     async def retry_video(self, video_id: str, *, requested_by: str | None = None) -> dict[str, Any]:
         return await self.request(
             "POST", f"/videos/{video_id}/retry", requested_by=requested_by
         )
 
-    async def get_transcript(self, video_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/videos/{video_id}/transcript")
+    async def get_transcript(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET", f"/videos/{video_id}/transcript", requested_by=requested_by
+        )
 
-    async def list_transcripts(self, video_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/videos/{video_id}/transcripts")
+    async def list_transcripts(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET", f"/videos/{video_id}/transcripts", requested_by=requested_by
+        )
 
-    async def get_transcript_segments(self, video_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/videos/{video_id}/transcript/segments")
+    async def get_transcript_segments(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET",
+            f"/videos/{video_id}/transcript/segments",
+            requested_by=requested_by,
+        )
 
     async def save_transcript(
         self,
@@ -453,11 +496,19 @@ class ApiClient:
             requested_by=requested_by,
         )
 
-    async def list_merges(self, video_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/videos/{video_id}/merges")
+    async def list_merges(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET", f"/videos/{video_id}/merges", requested_by=requested_by
+        )
 
-    async def get_merge(self, merge_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/merges/{merge_id}")
+    async def get_merge(
+        self, merge_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET", f"/merges/{merge_id}", requested_by=requested_by
+        )
 
     async def apply_merge(
         self, merge_id: str, *, requested_by: str | None = None
@@ -474,6 +525,7 @@ class ApiClient:
         status: str | None = None,
         kind: str | None = None,
         video_id: str | None = None,
+        requested_by: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"page": page, "page_size": page_size}
         if status:
@@ -482,15 +534,25 @@ class ApiClient:
             params["kind"] = kind
         if video_id:
             params["video_id"] = video_id
-        return await self.request("GET", "/jobs", params=params)
+        return await self.request("GET", "/jobs", params=params, requested_by=requested_by)
 
-    async def get_job(self, job_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/jobs/{job_id}")
+    async def get_job(
+        self, job_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET", f"/jobs/{job_id}", requested_by=requested_by
+        )
 
     async def retry_job(self, job_id: str, *, requested_by: str | None = None) -> dict[str, Any]:
         return await self.request("POST", f"/jobs/{job_id}/retry", requested_by=requested_by)
 
-    async def get_media(self, video_id: str, *, variant: str = "original") -> bytes:
+    async def get_media(
+        self,
+        video_id: str,
+        *,
+        variant: str = "original",
+        requested_by: str | None = None,
+    ) -> bytes:
         """The video's bytes; ``variant="compressed"`` asks for the smaller copy.
 
         The oversized original cannot be uploaded to Telegram, so the backend
@@ -499,11 +561,17 @@ class ApiClient:
         :meth:`get_media_with_meta`, kept so existing callers keep receiving
         plain bytes; use that method when the ``X-Compressed`` marker matters.
         """
-        payload, _ = await self.get_media_with_meta(video_id, variant=variant)
+        payload, _ = await self.get_media_with_meta(
+            video_id, variant=variant, requested_by=requested_by
+        )
         return payload
 
     async def get_media_with_meta(
-        self, video_id: str, *, variant: str = "original"
+        self,
+        video_id: str,
+        *,
+        variant: str = "original",
+        requested_by: str | None = None,
     ) -> tuple[bytes, bool]:
         """The bytes plus whether they are the compressed delivery copy.
 
@@ -518,6 +586,7 @@ class ApiClient:
                 "GET",
                 f"/videos/{video_id}/media",
                 params={"variant": variant},
+                requested_by=requested_by,
                 expect_json=False,
             )
         except ApiError as exc:
@@ -640,22 +709,32 @@ class ApiClient:
 
     # -- dataset layer (v2) -----------------------------------------------
     # The bot authenticates as the service token, which the API treats as an
-    # editor on every folder, so these can address any folder by id.
+    # editor on every folder, so a call made without ``requested_by`` can
+    # address any folder by id (the admin surface). A user-facing caller
+    # passes the end user's ``telegram:<uid>`` so the backend evaluates that
+    # user's access rather than the shared service identity's.
     async def list_folders(
         self,
         *,
         parent_id: str | None = None,
         visibility: str | None = None,
+        requested_by: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if parent_id:
             params["parent_id"] = parent_id
         if visibility:
             params["visibility"] = visibility
-        return await self.request("GET", "/folders", params=params)
+        return await self.request(
+            "GET", "/folders", params=params, requested_by=requested_by
+        )
 
-    async def get_folder(self, folder_id: str) -> dict[str, Any]:
-        return await self.request("GET", f"/folders/{folder_id}")
+    async def get_folder(
+        self, folder_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET", f"/folders/{folder_id}", requested_by=requested_by
+        )
 
     async def create_folder(
         self,
@@ -684,6 +763,7 @@ class ApiClient:
         q: str | None = None,
         page: int = 1,
         page_size: int = 20,
+        requested_by: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"page": page, "page_size": page_size}
         if folder_id:
@@ -692,7 +772,9 @@ class ApiClient:
             params["cleaned"] = str(cleaned).lower()
         if q:
             params["q"] = q
-        return await self.request("GET", "/dataset/cards", params=params)
+        return await self.request(
+            "GET", "/dataset/cards", params=params, requested_by=requested_by
+        )
 
     async def create_share(
         self,
@@ -739,10 +821,15 @@ class ApiClient:
             requested_by=requested_by,
         )
 
-    async def download_folder_zip(self, folder_id: str) -> bytes:
+    async def download_folder_zip(
+        self, folder_id: str, *, requested_by: str | None = None
+    ) -> bytes:
         """The folder and its subtree as one archive (video + audio + transcript)."""
         response = await self.request(
-            "GET", f"/folders/{folder_id}/download", expect_json=False
+            "GET",
+            f"/folders/{folder_id}/download",
+            requested_by=requested_by,
+            expect_json=False,
         )
         return response.content
 

@@ -47,10 +47,16 @@ class MissingMediaClient:
     def __init__(self, video: dict) -> None:
         self.video = video
 
-    async def get_video(self, video_id: str):
+    async def get_video(self, video_id: str, *, requested_by: str | None = None):
         return {"id": video_id, **self.video}
 
-    async def get_media(self, video_id: str, variant: str | None = None) -> bytes:
+    async def get_media(
+        self,
+        video_id: str,
+        variant: str | None = None,
+        *,
+        requested_by: str | None = None,
+    ) -> bytes:
         raise ApiError("not_found", "Media is not available yet.", status_code=404)
 
     async def download_media_to(
@@ -123,11 +129,23 @@ class MediaClient:
         #: ("original" = the original, "compressed" = the smaller copy).
         self.download_variants: list[str | None] = []
 
-    async def get_video(self, video_id: str):
+    async def get_video(self, video_id: str, *, requested_by: str | None = None):
         self.video_calls += 1
         return {"id": video_id, "title": "A Video", "file_size": self.size}
 
-    async def get_media(self, video_id: str, variant: str | None = None) -> bytes:
+    async def get_portal_link(
+        self, video_id: str, *, requested_by: str | None = None
+    ) -> dict[str, Any]:
+        """No token on this stub: the bare `/video/<id>` page is what tests see."""
+        raise ApiError("not_found", "No portal link here.", status_code=404)
+
+    async def get_media(
+        self,
+        video_id: str,
+        variant: str | None = None,
+        *,
+        requested_by: str | None = None,
+    ) -> bytes:
         if variant == COMPRESSED_VARIANT:
             self.compressed_calls += 1
             if self.compressed_exception is not None:
@@ -195,10 +213,12 @@ class MediaClient:
         self.link_calls += 1
 
 
-async def _downloaded_video(api_client, backend, slug: str) -> str:
-    """Create a video and walk it to the 'downloaded' state."""
+async def _downloaded_video(
+    api_client, backend, slug: str, actor: str = "telegram:1"
+) -> str:
+    """Create a video as *actor* and walk it to the 'downloaded' state."""
     video = await api_client.create_video(
-        f"https://youtu.be/{slug}", requested_by="telegram:1"
+        f"https://youtu.be/{slug}", requested_by=actor
     )
     for _ in range(4):
         await api_client.get_video(video["id"])
@@ -208,7 +228,9 @@ async def _downloaded_video(api_client, backend, slug: str) -> str:
 @pytest.mark.asyncio
 async def test_media_command_uploads_the_file(api_client, backend) -> None:
     """The command fetches the bytes and sends them as a document."""
-    video_id = await _downloaded_video(api_client, backend, "media-upload")
+    video_id = await _downloaded_video(
+        api_client, backend, "media-upload", actor="telegram:42"
+    )
 
     bot = FakeBot()
     context = FakeContext(args=[video_id], bot=bot)
@@ -220,6 +242,65 @@ async def test_media_command_uploads_the_file(api_client, backend) -> None:
     documents = [m for m in bot.sent if m.get("document") is not None]
     assert documents, "the media should be delivered as a document"
     assert documents[0]["document"] == b"fake-media-bytes"
+
+
+@pytest.mark.asyncio
+async def test_media_command_reads_an_owned_video_as_the_user(api_client, backend) -> None:
+    """A normal user's `/media <own id>` works, and every content call names
+    that user — the backend never sees the service identity for their read."""
+    video_id = await _downloaded_video(
+        api_client, backend, "media-own", actor="telegram:42"
+    )
+
+    bot = FakeBot()
+    context = FakeContext(args=[video_id], bot=bot)
+    context.bot_data["api"] = api_client
+    update = FakeUpdate(user_id=42)
+    # The setup helper's own polls run as the service; only the handler's
+    # calls are under test.
+    start = len(backend.requests)
+
+    await media_command(update, context)
+
+    documents = [m for m in bot.sent if m.get("document") is not None]
+    assert documents, "the owner must receive their own file"
+    scoped = [
+        r for r in backend.requests[start:]
+        if r["path"].startswith(f"/api/v1/videos/{video_id}")
+    ]
+    assert scoped, "the video and its media must be fetched"
+    assert all(r["requested_by"] == "telegram:42" for r in scoped), (
+        "every content read must carry the end user, not drop to the service"
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_command_refuses_someone_elses_video(api_client, backend) -> None:
+    """A unit the user did not create is refused, and the reply says so."""
+    video_id = await _downloaded_video(
+        api_client, backend, "media-foreign", actor="telegram:1"
+    )
+
+    bot = FakeBot()
+    context = FakeContext(args=[video_id], bot=bot)
+    context.bot_data["api"] = api_client
+    context.bot_data["settings"] = _settings()
+    update = FakeUpdate(user_id=42)
+    start = len(backend.requests)
+
+    await media_command(update, context)
+
+    assert not any(m.get("document") is not None for m in bot.sent), (
+        "a non-owner must never receive the file"
+    )
+    text = " ".join(m.get("text", "") for m in bot.sent)
+    text += " ".join(r["text"] for r in update.message.replies)
+    assert "access" in text.lower(), "the refusal must be explained to the user"
+    reads = [
+        r for r in backend.requests[start:]
+        if r["path"] == f"/api/v1/videos/{video_id}"
+    ]
+    assert reads and all(r["requested_by"] == "telegram:42" for r in reads)
 
 
 @pytest.mark.asyncio
@@ -253,7 +334,9 @@ async def test_deliver_media_passes_the_links_to_the_document(api_client, backen
 @pytest.mark.asyncio
 async def test_media_command_document_carries_the_web_links(api_client, backend) -> None:
     """/media fetches the video dict, so the file arrives with the buttons."""
-    video_id = await _downloaded_video(api_client, backend, "media-buttons")
+    video_id = await _downloaded_video(
+        api_client, backend, "media-buttons", actor="telegram:999"
+    )
     folder = backend.add_folder("Fieldwork")
     backend.videos[video_id]["folder_id"] = folder["id"]
 
@@ -268,7 +351,8 @@ async def test_media_command_document_carries_the_web_links(api_client, backend)
     documents = [m for m in bot.sent if m.get("document") is not None]
     assert documents, "the media should be delivered as a document"
     urls = [b.url for row in documents[0]["reply_markup"].inline_keyboard for b in row]
-    assert f"https://portal.test/video/{video_id}" in urls
+    portal = f"https://portal.test/video/{video_id}"
+    assert any(url and url.startswith(portal) and "?t=" in url for url in urls)
     assert f"https://console.test/videos/{video_id}" in urls
 
 
@@ -372,8 +456,10 @@ async def test_the_too_large_notice_does_not_promise_a_hidden_link(monkeypatch) 
         portal_frontend_url="http://localhost:5174",
         admin_frontend_url="http://localhost:5173",
     )
-    monkeypatch.setattr("bot.handlers.media.portal_button", lambda _id: None)
-    monkeypatch.setattr("bot.handlers.media.portal_url", lambda _id, _s=None: None)
+    monkeypatch.setattr("bot.handlers.media.portal_button", lambda _id, **_kw: None)
+    monkeypatch.setattr(
+        "bot.handlers.media.portal_url", lambda _id, _s=None, **_kw: None
+    )
     client = MediaClient(payload=b"x", size=MAX_UPLOAD_BYTES + 1)
     bot = FakeBot()
 
@@ -596,7 +682,7 @@ async def test_deliver_media_explains_when_the_resend_fails() -> None:
 class OfflineAudioClient:
     """A client whose audio endpoint cannot be reached, like a dead backend."""
 
-    async def get_video(self, video_id: str):
+    async def get_video(self, video_id: str, *, requested_by: str | None = None):
         return {"id": video_id, "title": "A Video"}
 
     async def get_audio(self, video_id: str, **kwargs: Any) -> bytes:
@@ -613,7 +699,7 @@ async def test_audio_command_sends_the_stored_mp3(api_client, backend) -> None:
     bot = FakeBot()
     context = FakeContext(args=[video_id], bot=bot)
     context.bot_data["api"] = api_client
-    update = FakeUpdate()
+    update = FakeUpdate(user_id=1)
 
     await audio_command(update, context)
 
@@ -627,7 +713,9 @@ async def test_audio_command_sends_the_stored_mp3(api_client, backend) -> None:
 @pytest.mark.asyncio
 async def test_audio_command_says_when_the_mp3_is_not_extracted(api_client, backend) -> None:
     """A video with no mp3 yet is explained, and pointed at /status."""
-    video = await api_client.create_video("https://youtu.be/audio-404")
+    video = await api_client.create_video(
+        "https://youtu.be/audio-404", requested_by="telegram:42"
+    )
 
     bot = FakeBot()
     context = FakeContext(args=[video["id"]], bot=bot)

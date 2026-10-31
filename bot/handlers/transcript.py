@@ -11,7 +11,15 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import BOT_NOT_READY, escape_markdown, get_client, is_uuid, web_links
+from ..helpers import (
+    BOT_NOT_READY,
+    actor_for,
+    escape_markdown,
+    get_client,
+    is_uuid,
+    portal_token_for,
+    web_links,
+)
 from ..keyboards import transcript_versions_keyboard
 
 logger = logging.getLogger(__name__)
@@ -33,9 +41,9 @@ PENDING_EDIT_KEY = "pending_edit_video_id"
 
 EDIT_USAGE = (
     "Usage:\n"
-    "`/edit <video id>` — send the corrected text in your next message\n"
-    "`/edit <video id> <new text>` — save in one go\n"
-    "`/cancel` — abandon a draft"
+    "`/edit <video id>`: send the corrected text in your next message\n"
+    "`/edit <video id> <new text>`: save in one go\n"
+    "`/cancel`: abandon a draft"
 )
 
 
@@ -66,13 +74,16 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text(BOT_NOT_READY)
         return
 
+    # The transcript and the video are both read as this Telegram user, so the
+    # backend can refuse a unit they have no right to before anything is shown.
+    requested_by = actor_for(update)
     try:
-        transcript = await client.get_transcript(video_id)
+        transcript = await client.get_transcript(video_id, requested_by=requested_by)
     except ApiError as exc:
         if exc.status_code == 404:
             await message.reply_text(
                 f"No transcript yet for video `{video_id}`.\n"
-                "Transcription runs in the background — try again in a minute, or use "
+                "Transcription runs in the background, so try again in a minute, or use "
                 f"/status {video_id}.",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -96,21 +107,33 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # The link buttons need the video's folder, which the transcript payload
     # does not carry — fetch the video tolerantly, once, for every reply below.
+    # The same identity is reused for the token mint, so the backend attributes
+    # the access check to this Telegram user rather than to the bot.
     try:
-        video = await client.get_video(video_id)
+        video = await client.get_video(video_id, requested_by=requested_by)
     except (ApiError, ApiNetworkError):
         video = {}
-    links = web_links(update, context, video=video, video_id=video_id)
+    portal = await portal_token_for(
+        client, video_id, requested_by=requested_by
+    )
+    links = web_links(
+        update,
+        context,
+        video=video,
+        video_id=video_id,
+        token=portal.token,
+        allow_portal=portal.linkable(confirmed=bool(video)),
+    )
 
     if status != "ready":
         await message.reply_text(
-            f"Transcript v{version} (source={escape_markdown(source)}) is `{status}` — not ready yet.",
+            f"Transcript v{version} (source={escape_markdown(source)}) is `{status}`, so it is not ready yet.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=links,
         )
         return
 
-    header = f"Transcript v{version} (source={source}) — {len(content)} chars"
+    header = f"Transcript v{version} (source={source}): {len(content)} chars"
     if len(content) <= _limit(context):
         await message.reply_text(
             f"{header}\n\n{escape_markdown(content)}",
@@ -154,7 +177,9 @@ async def transcripts_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        payload = await client.list_transcripts(video_id)
+        payload = await client.list_transcripts(
+            video_id, requested_by=actor_for(update)
+        )
     except ApiError as exc:
         if exc.status_code == 404:
             await message.reply_text(
@@ -242,7 +267,9 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     try:
-        transcript = await client.get_transcript(video_id)
+        transcript = await client.get_transcript(
+            video_id, requested_by=actor_for(update)
+        )
     except ApiError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
@@ -317,7 +344,7 @@ async def _save_edit(
 ) -> None:
     """Save `text` as a new transcript version and report the new version."""
     if not text.strip():
-        await message.reply_text("The corrected transcript is empty — nothing saved.")
+        await message.reply_text("The corrected transcript is empty, so nothing was saved.")
         return
 
     try:
@@ -341,7 +368,7 @@ async def _save_edit(
 
     version = (saved or {}).get("version", "?")
     await message.reply_text(
-        f"Saved as *v{version}* for `{video_id}` — the previous version is still "
+        f"Saved as *v{version}* for `{video_id}`. The previous version is still "
         "available via `/transcripts`.",
         parse_mode=ParseMode.MARKDOWN,
     )

@@ -6,8 +6,9 @@ import ipaddress
 import logging
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -30,7 +31,9 @@ __all__ = [
     "admin_url",
     "get_settings_or_default",
     "is_admin",
+    "PortalToken",
     "portal_button",
+    "portal_token_for",
     "portal_url",
     "user_message_for",
     "web_links",
@@ -43,7 +46,7 @@ URL_RE = re.compile(
 #: Shown when the backend is not reachable yet. One constant so the wording
 #: cannot drift between handlers, and so no handler ever interpolates the raw
 #: exception into user-facing text.
-BOT_NOT_READY = "The bot is still starting up — try again in a moment."
+BOT_NOT_READY = "The bot is still starting up, so try again in a moment."
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -163,8 +166,17 @@ def _telegram_accepts_url(url: str) -> bool:
     return not (ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast)
 
 
+def _token_query(token: str | None) -> str | None:
+    """The query string carrying the signed portal token, or None when absent.
+
+    A JWT only uses URL-safe characters, but quoting keeps a malformed value
+    from breaking the URL shape.
+    """
+    return f"t={quote(token, safe='')}" if token else None
+
+
 def _web_button(
-    label: str, base: str, env_var: str, *segments: Any
+    label: str, base: str, env_var: str, *segments: Any, query: str | None = None
 ) -> InlineKeyboardButton | None:
     """A URL button for ``base``, or None when Telegram would reject the link.
 
@@ -172,6 +184,8 @@ def _web_button(
     BadRequest that loses the whole reply.
     """
     url = _join_url(base, *segments)
+    if query:
+        url = f"{url}?{query}"
     if _telegram_accepts_url(url):
         return InlineKeyboardButton(label, url=url)
     if base not in _warned_link_bases:
@@ -186,11 +200,15 @@ def _web_button(
     return None
 
 
-def portal_button(video_id: Any, settings: Settings | None = None) -> InlineKeyboardButton | None:
+def portal_button(
+    video_id: Any, settings: Settings | None = None, *, token: str | None = None
+) -> InlineKeyboardButton | None:
     """The "Open in portal" button for one unit, or None when unavailable.
 
     Standalone so a reply that never saw an ``Update`` — the oversized-file
-    notice inside ``deliver_media`` — can still carry the link.
+    notice inside ``deliver_media`` — can still carry the link. *token* is the
+    backend-minted ``?t=`` value; without one (an older backend, a failed
+    call) the bare page is still linked — its creator can sign in there.
     """
     settings = settings or get_settings()
     return _web_button(
@@ -199,19 +217,111 @@ def portal_button(video_id: Any, settings: Settings | None = None) -> InlineKeyb
         "PORTAL_FRONTEND_URL",
         "video",
         video_id,
+        query=_token_query(token),
     )
 
 
-def portal_url(video_id: Any, settings: Settings | None = None) -> str | None:
+def portal_url(
+    video_id: Any, settings: Settings | None = None, *, token: str | None = None
+) -> str | None:
     """The portal page for one unit as plain text, or None when unusable.
 
     Used where the reply must state the address itself (the "too large for
     Telegram" notice), so the link survives copy-paste even on a client that
-    will not render the button.
+    will not render the button. The same optional *token* as
+    :func:`portal_button` rides along in the ``?t=`` query.
     """
     settings = settings or get_settings()
     url = _join_url(settings.portal_frontend_url, "video", video_id)
+    query = _token_query(token)
+    if query:
+        url = f"{url}?{query}"
     return url if _telegram_accepts_url(url) else None
+
+
+@dataclass(frozen=True, slots=True)
+class PortalToken:
+    """The outcome of minting one video's ``?t=`` portal token.
+
+    ``forbidden`` is the one answer that is about the caller's *rights*: the
+    endpoint answered 403, so this Telegram user may not see the unit. Every
+    other failure — an older backend without the route, a 500, a network drop
+    — is infrastructure and leaves ``token`` None. The two must stay separate:
+    only the first suppresses the link outright (see :meth:`linkable`), while
+    the second may still degrade to the bare page.
+    """
+
+    token: str | None = None
+    forbidden: bool = False
+
+    def linkable(self, *, confirmed: bool) -> bool:
+        """Whether a reply may link the portal page for this caller.
+
+        Fail closed on rights: a 403 means no button and no bare URL either,
+        because the page would refuse the user. Without a token the bare page
+        is linked only when *confirmed* — the same request already read the
+        video as this user, which proves they can open it. That keeps the
+        graceful degradation for an infrastructure failure without ever
+        advertising a page the caller was refused.
+        """
+        if self.forbidden:
+            return False
+        return self.token is not None or confirmed
+
+
+#: Set after the first failed token fetch so a deployment missing the endpoint
+#: is reported once instead of on every reply.
+_warned_portal_token = False
+
+
+def _warn_portal_token_unavailable(exc: BaseException) -> None:
+    global _warned_portal_token
+    if not _warned_portal_token:
+        _warned_portal_token = True
+        logger.warning(
+            "portal-link token unavailable; falling back to bare "
+            "/video/<id> URLs: %s",
+            exc,
+        )
+
+
+async def portal_token_for(
+    client: Any, video_id: Any, *, requested_by: str | None = None
+) -> PortalToken:
+    """The ``?t=`` token for one video's portal page.
+
+    An unfiled unit is invisible to a browser visitor, so the portal link a
+    reply carries gets a signed, 7-day token the backend mints — the signing
+    key never lives in the bot. *requested_by* is the end user's
+    ``telegram:<uid>`` identity and must ride along: with it the endpoint
+    evaluates *that user's* rights, so the service token alone can never mint
+    a link for an id the user only guessed. A 403 comes back as
+    ``forbidden``; any other failure (older backend, transient outage,
+    deleted unit) leaves no token and the caller may fall back to the bare
+    page when it has proof of access.
+    """
+    if not video_id:
+        return PortalToken()
+    try:
+        payload = await client.get_portal_link(
+            video_id, requested_by=requested_by
+        )
+    except ApiError as exc:
+        if exc.status_code == 403:
+            # Not a degradation: the backend refused this user the unit.
+            logger.info(
+                "portal-link refused for %s (requested_by=%s)",
+                video_id,
+                requested_by,
+            )
+            return PortalToken(forbidden=True)
+        _warn_portal_token_unavailable(exc)
+        return PortalToken()
+    except ApiNetworkError as exc:
+        _warn_portal_token_unavailable(exc)
+        return PortalToken()
+    token = payload.get("token") if isinstance(payload, Mapping) else None
+    return PortalToken(token=str(token) if token else None)
 
 
 def admin_url(video_id: Any, settings: Settings | None = None) -> str | None:
@@ -229,6 +339,8 @@ def web_links(
     folder_id: Any = None,
     video_id: Any = None,
     markup: InlineKeyboardMarkup | None = None,
+    token: str | None = None,
+    allow_portal: bool = True,
 ) -> InlineKeyboardMarkup | None:
     """Tappable web buttons for a reply that mentions a video or folder.
 
@@ -242,10 +354,16 @@ def web_links(
 
     ``folder_id`` / ``video_id`` override the video mapping's values, for call
     sites that know an id but have no video dict (``/transcript <id>``, the
-    admin ``/retry`` watch). ``markup`` is an existing keyboard to extend with
-    the link row, so its buttons survive. Returns ``markup`` unchanged (None
-    when not given) when there is nothing to show — ``reply_markup=None`` is
-    Telegram's "no keyboard", so callers can pass the result straight through.
+    admin ``/retry`` watch). ``token`` is the backend-minted per-video
+    ``?t=`` value, fetched once by ``portal_token_for`` so an unfiled unit's
+    page is reachable without a console login; without it the bare page is
+    linked. ``allow_portal=False`` suppresses the portal button entirely —
+    the fail-closed answer for a backend 403 (see ``PortalToken.linkable``),
+    where even the bare page would refuse this user. ``markup`` is an existing
+    keyboard to extend with the link row, so
+    its buttons survive. Returns ``markup`` unchanged (None when not given)
+    when there is nothing to show — ``reply_markup=None`` is Telegram's "no
+    keyboard", so callers can pass the result straight through.
 
     A link whose base URL is loopback (``localhost``, ``127.0.0.1``, ``[::1]``)
     is dropped rather than sent: the Bot API rejects it with "wrong http url"
@@ -261,9 +379,10 @@ def web_links(
 
     buttons: list[InlineKeyboardButton] = []
     if video_id:
-        button = portal_button(video_id, settings)
-        if button is not None:
-            buttons.append(button)
+        if allow_portal:
+            button = portal_button(video_id, settings, token=token)
+            if button is not None:
+                buttons.append(button)
     elif folder_id:
         button = _web_button(
             "🌐 Open folder",
@@ -360,7 +479,7 @@ def user_message_for(exc: BaseException) -> str:
         return exc.user_message()
     if isinstance(exc, ApiNetworkError):
         return exc.user_message()
-    return "Something went wrong on our side — please try again in a moment."
+    return "Something went wrong on our side, so please try again in a moment."
 
 
 def is_uuid(value: str | None) -> bool:

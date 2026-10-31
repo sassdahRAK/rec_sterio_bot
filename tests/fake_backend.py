@@ -54,6 +54,16 @@ class FakeBackend:
         self.compressed_failure: tuple[int, str, str] | None = None
         #: statuses a newly created merge walks through, one per GET /merges/{id}
         self.merge_status_script: list[str] = ["ready"]
+        #: video ids whose portal link token the bot asked to mint
+        self.portal_links: list[str] = []
+        #: when set, POST /videos/{id}/portal-link answers this failure instead
+        self.portal_link_failure: tuple[int, str, str] | None = None
+        #: ``X-Requested-By`` actors the portal-link route refuses with 403,
+        #: mirroring the real guard that evaluates the end user's access to
+        #: the named video. Matching on the header is deliberate: a bot that
+        #: drops ``requested_by`` is not refused here, so the "no button"
+        #: tests can only pass when the identity is actually sent.
+        self.portal_link_denied: set[str] = set()
         self.requests: list[dict[str, Any]] = []
         #: bodies received by POST /videos/upload (size, content type, attribution)
         self.uploads: list[dict[str, Any]] = []
@@ -120,6 +130,29 @@ class FakeBackend:
                 "authorization": request.headers.get("authorization"),
             }
         )
+
+    def _access_denied(
+        self, request: Request, video: dict[str, Any]
+    ) -> JSONResponse | None:
+        """The backend's owner-or-folder guard for content routes.
+
+        A request with no ``X-Requested-By`` is the bot's service identity and
+        reads everything: the admin surface runs on it deliberately. A
+        ``telegram:<uid>`` caller only reaches a video they created or one
+        filed in a public folder, mirroring the real access check that stops a
+        guessed id from leaking a unit. A dropped ``requested_by`` therefore
+        shows up here as the service identity, which the identity tests assert
+        is never the case for user-facing reads.
+        """
+        actor = request.headers.get("x-requested-by")
+        if not actor:
+            return None
+        if video.get("created_by") == actor:
+            return None
+        folder = self.folders.get(video.get("folder_id") or "")
+        if folder is not None and folder.get("visibility") == "public":
+            return None
+        return self._error(403, "forbidden", "You do not have access to this video.")
 
     def _maybe_fail(self) -> PlainTextResponse | None:
         if self.fail_next is None:
@@ -435,6 +468,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             self._advance(video)
             return {
                 **{k: v for k, v in video.items() if k not in {"script_index", "status_script"}},
@@ -456,6 +492,10 @@ class FakeBackend:
                     "variant must be 'original' or 'compressed'.",
                 )
             video = self.videos.get(video_id)
+            if video is not None:
+                denied = self._access_denied(request, video)
+                if denied is not None:
+                    return denied
             available = video is not None and video["status"] in {
                 "downloaded",
                 "transcribed",
@@ -539,6 +579,10 @@ class FakeBackend:
                     [{"field": "format", "issue": "unsupported_format"}],
                 )
             video = self.videos.get(video_id)
+            if video is not None:
+                denied = self._access_denied(request, video)
+                if denied is not None:
+                    return denied
             if video is None or video["status"] not in {"downloaded", "transcribed"}:
                 return self._error(
                     404, "not_found", "MP3 has not been extracted for this video."
@@ -560,6 +604,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             transcripts = video.get("transcripts") or []
             if not transcripts:
                 return self._error(404, "not_found", "No transcript for this video.")
@@ -575,6 +622,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             body = await request.json()
             transcripts = video.setdefault("transcripts", [])
             version = max((t.get("version", 0) for t in transcripts), default=0) + 1
@@ -607,6 +657,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             body = await request.json()
             if not body.get("location_tag"):
                 return self._error(422, "validation_failed", "location_tag is required.")
@@ -642,6 +695,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             body = await request.json()
             video["telegram_file_id"] = body.get("file_id")
             if body.get("message_id") is not None:
@@ -658,6 +714,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             body = await request.json()
             engine = body.get("engine", "whisper")
             job = {
@@ -689,6 +748,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             body = await request.json()
             transcripts = video.get("transcripts") or []
             gemini = [t for t in transcripts if t.get("source") == "gemini"]
@@ -720,8 +782,12 @@ class FakeBackend:
             unauth = self._auth(request)
             if unauth is not None:
                 return unauth
-            if video_id not in self.videos:
+            video = self.videos.get(video_id)
+            if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             items = [m for m in self.merges.values() if m["video_id"] == video_id]
             return {"items": items}
 
@@ -734,6 +800,11 @@ class FakeBackend:
             merge = self.merges.get(merge_id)
             if merge is None:
                 return self._error(404, "not_found", f"No merge {merge_id}.")
+            video = self.videos.get(merge["video_id"])
+            if video is not None:
+                denied = self._access_denied(request, video)
+                if denied is not None:
+                    return denied
             script = merge.get("merge_script") or []
             if script:
                 merge["status"] = script.pop(0)
@@ -782,6 +853,11 @@ class FakeBackend:
             merge = self.merges.get(merge_id)
             if merge is None:
                 return self._error(404, "not_found", f"No merge {merge_id}.")
+            video = self.videos.get(merge["video_id"])
+            if video is not None:
+                denied = self._access_denied(request, video)
+                if denied is not None:
+                    return denied
             if merge.get("status") != "ready":
                 return self._error(409, "conflict", "This merge is not ready to be applied.")
             video = self.videos[merge["video_id"]]
@@ -803,7 +879,35 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             return {"items": list(video.get("transcripts") or [])}
+
+        @app.post("/api/v1/videos/{video_id}/portal-link")
+        async def create_portal_link(video_id: str, request: Request) -> Any:
+            """The signed 7-day link token an unfiled unit's reply carries."""
+            self._record(request)
+            unauth = self._auth(request)
+            if unauth is not None:
+                return unauth
+            if self.portal_link_failure is not None:
+                status, code, message = self.portal_link_failure
+                return self._error(status, code, message)
+            requested_by = request.headers.get("x-requested-by")
+            if requested_by and requested_by in self.portal_link_denied:
+                return self._error(
+                    403, "forbidden", "You do not have access to this video."
+                )
+            if video_id not in self.videos:
+                return self._error(404, "not_found", f"No video {video_id}.")
+            token = f"tkn-{video_id}"
+            self.portal_links.append(video_id)
+            return {
+                "token": token,
+                "expires_at": "2026-11-07T00:00:00Z",
+                "path": f"/video/{video_id}?t={token}",
+            }
 
         @app.post("/api/v1/videos/{video_id}/retry")
         async def retry_video(video_id: str, request: Request) -> Any:
@@ -814,6 +918,9 @@ class FakeBackend:
             video = self.videos.get(video_id)
             if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            denied = self._access_denied(request, video)
+            if denied is not None:
+                return denied
             job = {
                 "id": str(uuid.uuid4()),
                 "kind": "download",
@@ -1154,7 +1261,7 @@ class FakeBackend:
                 return self._error(
                     422,
                     "version_mismatch",
-                    "The consent text has changed — run /cookies again.",
+                    "The consent text has changed. Run /cookies again.",
                 )
             record = self.bot_users.setdefault(
                 telegram_id, self._empty_bot_user(telegram_id)

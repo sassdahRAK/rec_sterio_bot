@@ -176,7 +176,7 @@ async def folders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     payload = await _call(
         update,
         context,
-        client.list_folders(parent_id=parent_id),
+        client.list_folders(parent_id=parent_id, requested_by=actor_for(update)),
     )
     if payload is None:
         return
@@ -216,7 +216,9 @@ async def folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text(BOT_NOT_READY)
         return
 
-    node = await _call(update, context, client.get_folder(folder_id))
+    node = await _call(
+        update, context, client.get_folder(folder_id, requested_by=actor_for(update))
+    )
     if node is None:
         return
 
@@ -313,6 +315,7 @@ async def _list_cards(
             cleaned=True if cleaned else None,
             q=query,
             page_size=10,
+            requested_by=actor_for(update),
         ),
     )
     if payload is None:
@@ -596,7 +599,11 @@ async def zip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(BOT_NOT_READY)
         return
 
-    archive = await _call(update, context, client.download_folder_zip(folder_id))
+    archive = await _call(
+        update,
+        context,
+        client.download_folder_zip(folder_id, requested_by=actor_for(update)),
+    )
     if archive is None:
         return
 

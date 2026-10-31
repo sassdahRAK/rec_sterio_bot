@@ -19,6 +19,7 @@ from ..helpers import (
     escape_markdown,
     extract_url,
     get_client,
+    portal_token_for,
     web_links,
 )
 from ..keyboards import video_keyboard
@@ -114,6 +115,7 @@ async def watch_video(
     timeout: float = 1200.0,
     deliver: bool = True,
     reply_markup: InlineKeyboardMarkup | None = None,
+    requested_by: str | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> str:
@@ -137,7 +139,7 @@ async def watch_video(
 
     while clock() < deadline:
         try:
-            video = await client.get_video(video_id)
+            video = await client.get_video(video_id, requested_by=requested_by)
         except ApiError as exc:
             logger.info("watch %s: api error %s", video_id, exc.code)
             await _safe_send(
@@ -169,7 +171,15 @@ async def watch_video(
             # instruction.txt #2: the finished file goes to the chat right away,
             # not only on request. A delivery failure must never kill the watch.
             try:
-                await deliver_media(bot, chat_id, client, video_id, video=video, reply_markup=reply_markup)
+                await deliver_media(
+                    bot,
+                    chat_id,
+                    client,
+                    video_id,
+                    video=video,
+                    reply_markup=reply_markup,
+                    requested_by=requested_by,
+                )
             except Exception as exc:  # noqa: BLE001 - keep polling regardless
                 logger.warning("could not deliver media for %s: %s", video_id, exc)
 
@@ -242,6 +252,7 @@ def start_watch(
     *,
     deliver: bool = True,
     reply_markup: InlineKeyboardMarkup | None = None,
+    requested_by: str | None = None,
 ) -> bool:
     """Register the background watch for ``video_id`` on the shared registry.
 
@@ -272,6 +283,7 @@ def start_watch(
             timeout=getattr(settings, "poll_timeout_seconds", 1200.0),
             deliver=deliver,
             reply_markup=reply_markup,
+            requested_by=requested_by,
         ),
     )
     if not started:
@@ -323,13 +335,34 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # The web-link buttons are computed once and travel with the watch, so
     # every later notification ("Download complete", "Transcript ready", the
-    # delivered file) carries the same links as this reply.
-    links = web_links(update, context, video=payload, markup=video_keyboard(video_id))
+    # delivered file) carries the same links as this reply. The ?t= token is
+    # minted once here too — one call per queued unit, not one per message.
+    requested_by = actor_for(update)
+    portal = await portal_token_for(
+        client, video_id, requested_by=requested_by
+    )
+    links = web_links(
+        update,
+        context,
+        video=payload,
+        markup=video_keyboard(video_id),
+        token=portal.token,
+        # `payload` is the row the backend just created for this same user,
+        # which is the proof of access the bare-page fallback relies on.
+        allow_portal=portal.linkable(confirmed=bool(payload)),
+    )
     await message.reply_text(
-        f"Queued for download — video id `{video_id}`\n"
+        f"Queued for download. Video id `{video_id}`\n"
         f"I will notify you when it is ready. Use /status {video_id} any time.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=links,
     )
 
-    start_watch(context, client, message.chat_id, video_id, reply_markup=links)
+    start_watch(
+        context,
+        client,
+        message.chat_id,
+        video_id,
+        reply_markup=links,
+        requested_by=requested_by,
+    )

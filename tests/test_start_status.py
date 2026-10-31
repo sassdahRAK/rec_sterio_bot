@@ -18,24 +18,31 @@ def _context(client, args=None):
     return FakeContext(args=list(args or []), bot_data={"api": client, "settings": settings})
 
 
-async def test_start_sends_the_welcome_message(api_client):
+async def test_start_sends_the_short_welcome_page(api_client):
     update = FakeUpdate(user_id=1)
     ctx = _context(api_client)
 
     await start(update, ctx)
 
     text = update.message.replies[0]["text"]
-    assert "recsterio" in text
+    assert "recsterio" in text.lower()
     assert "link" in text.lower()
+    # the quick start points at /help instead of listing every command
+    assert "/help" in text
+    assert "/transcript <video id>" not in text
 
 
-async def test_help_sends_the_welcome_message(api_client):
+async def test_help_sends_the_full_command_reference(api_client):
     update = FakeUpdate(user_id=1)
     ctx = _context(api_client)
 
     await help_command(update, ctx)
 
-    assert "recsterio" in update.message.replies[0]["text"]
+    text = update.message.replies[0]["text"]
+    assert "recsterio" in text.lower()
+    # commands that only belong in the full reference
+    assert "/transcript <video id>" in text
+    assert "/folders" in text
 
 
 async def test_start_with_a_deep_link_shows_the_video(api_client, backend):
@@ -68,7 +75,10 @@ async def test_status_shows_progress_size_and_duration(api_client, backend):
 
 
 async def test_status_reply_carries_the_web_links_for_an_admin(api_client, backend):
-    video = await api_client.create_video("https://youtu.be/links", requested_by="telegram:1")
+    # Owned by the admin who reads it; a Telegram user only sees their units.
+    video = await api_client.create_video(
+        "https://youtu.be/links", requested_by="telegram:999"
+    )
     folder = backend.add_folder("Status folder")
     backend.videos[video["id"]]["folder_id"] = folder["id"]
 
@@ -79,7 +89,8 @@ async def test_status_reply_carries_the_web_links_for_an_admin(api_client, backe
 
     markup = update.message.replies[0]["reply_markup"]
     urls = [b.url for row in markup.inline_keyboard for b in row]
-    assert f"https://portal.test/video/{video['id']}" in urls
+    portal = f"https://portal.test/video/{video['id']}"
+    assert any(url and url.startswith(portal) and "?t=" in url for url in urls)
     assert f"https://console.test/videos/{video['id']}" in urls
     # the pre-existing video buttons survive the merge
     assert "Status" in [b.text for row in markup.inline_keyboard for b in row]

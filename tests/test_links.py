@@ -167,8 +167,10 @@ async def test_queued_reply_carries_the_portal_link_for_a_filed_video(api_client
 
     markup = update.message.replies[0]["reply_markup"]
     urls = [b.url for row in markup.inline_keyboard for b in row]
-    # A video reply links to the unit's own portal page, folder or not.
-    assert f"https://portal.test/video/{video['id']}" in urls
+    # A video reply links to the unit's own portal page, folder or not; the
+    # backend-minted ?t= token makes an unfiled unit reachable without login.
+    portal = f"https://portal.test/video/{video['id']}"
+    assert any(url and url.startswith(portal) and "?t=" in url for url in urls)
     # user 42 is not an admin, so no console button anywhere.
     assert all("/videos/" not in (url or "") for url in urls)
     await ctx.bot_data["watchers"].cancel_all()
@@ -202,14 +204,20 @@ class BrokenMediaWatchClient:
     def __init__(self) -> None:
         self._statuses = iter(["downloaded", "transcribed"])
 
-    async def get_video(self, video_id: str):
+    async def get_video(self, video_id: str, *, requested_by: str | None = None):
         return {
             "id": video_id,
             "status": next(self._statuses, "transcribed"),
             "transcripts": [],
         }
 
-    async def get_media(self, video_id: str, variant: str | None = None) -> bytes:
+    async def get_media(
+        self,
+        video_id: str,
+        variant: str | None = None,
+        *,
+        requested_by: str | None = None,
+    ) -> bytes:
         from bot.client import ApiError
 
         raise ApiError("not_found", "Media is not available yet.", status_code=404)

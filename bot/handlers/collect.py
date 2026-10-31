@@ -42,8 +42,8 @@ __all__ = ["build_conversation", "record_command", "records_command"]
 
 USAGE = (
     "Usage: `/collect` then paste the link.\n"
-    "`/record <video id>` — show one item's RecSterio record\n"
-    "`/records` — the most recent records"
+    "`/record <video id>`: show one item's RecSterio record\n"
+    "`/records`: the most recent records"
 )
 
 # A text choice rather than inline buttons: a CallbackQueryHandler inside a
@@ -51,8 +51,8 @@ USAGE = (
 # this step is one keystroke either way.
 METHOD_PROMPT = (
     "How was this collected?\n"
-    "1 — Manual browse\n"
-    "2 — Research API"
+    "1. Manual browse\n"
+    "2. Research API"
 )
 
 _METHOD_WORDS = {
@@ -191,7 +191,7 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     await message.reply_text(
         f"Queued `{video.get('id')}` ({video.get('platform', 'unknown')}).\n\n"
-        "The download and transcription run in the background — the record "
+        "The download and transcription run in the background, so the record "
         "saves now, and the metadata fills in when the fetch finishes.\n\n"
         "*Location tag?*\n"
         "The place name exactly as stated in the content, e.g. "
@@ -207,7 +207,7 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if text.lower() in {"/cancel", "cancel"}:
         return await cancel(update, context)
     if not text:
-        await message.reply_text("A location tag is required — type the place name.")
+        await message.reply_text("A location tag is required, so type the place name.")
         return ASK_LOCATION
 
     draft = _state(context)
@@ -233,7 +233,7 @@ async def receive_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await message.reply_text(
         f"Collection method: {method}\n\n"
         "*Notes?*\n"
-        "Relevance assessment, access issues, content warnings — or `-` to skip.",
+        "Relevance assessment, access issues, content warnings, or `-` to skip.",
         parse_mode=ParseMode.MARKDOWN,
     )
     return ASK_NOTES
@@ -256,7 +256,7 @@ async def _save(
     draft = _state(context)
     video_id = draft.get("video_id")
     if not video_id:
-        await message.reply_text("Something went wrong — the draft was lost. Start again with /collect.")
+        await message.reply_text("Something went wrong, so the draft was lost. Start again with /collect.")
         _clear(context)
         return ConversationHandler.END
 
@@ -364,7 +364,7 @@ async def record_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        video = await client.get_video(video_id)
+        video = await client.get_video(video_id, requested_by=actor_for(update))
     except ApiError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
@@ -391,7 +391,10 @@ async def records_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     try:
-        payload = await client.list_videos({"page": 1, "page_size": 20, "sort": "-created_at"})
+        payload = await client.list_videos(
+            {"page": 1, "page_size": 20, "sort": "-created_at"},
+            requested_by=actor_for(update),
+        )
     except ApiError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return

@@ -33,7 +33,7 @@ INVALID_CODE_MESSAGE = (
 
 #: 401 at confirm time: the code was valid when shown, but is not any more.
 STALE_CODE_MESSAGE = (
-    "That code is no longer valid — generate a fresh one from the console."
+    "That code is no longer valid, so generate a fresh one from the console."
 )
 
 
@@ -64,7 +64,7 @@ async def handle_start_link(
     uid = getattr(user, "id", None)
     if uid is None:
         await message.reply_text(
-            "[unknown_user] I could not tell who is asking — please try again."
+            "[unknown_user] I could not tell who is asking, so please try again."
         )
         return
 
@@ -137,7 +137,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         client = get_client(context)
     except RuntimeError:
         await query.answer(
-            text="The link could not be completed — tap Confirm again in a moment.",
+            text="The link could not be completed, so tap Confirm again in a moment.",
             show_alert=True,
         )
         return
@@ -161,7 +161,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await query.edit_message_text(
-        "Linked — this Telegram is now "
+        "Linked. This Telegram is now "
         f"`{_code_span(_account_field(account, 'account_name'))}` "
         f"(`{_code_span(_account_field(account, 'account_email'))}`), "
         f"role `{_code_span(_account_field(account, 'account_role'))}`.",
@@ -184,7 +184,7 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if user is None:
         await message.reply_text(
-            "[unknown_user] I could not tell who is asking — please try again."
+            "[unknown_user] I could not tell who is asking, so please try again."
         )
         return
 
@@ -225,13 +225,13 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     else:
         lines.append(
-            "No linked console account — link one from the console Settings page."
+            "No linked console account yet. Link one from the console Settings page."
         )
 
     if record is not None and record.get("consented") and record.get("cookies_present"):
         lines.append("TikTok/Facebook downloads: consented + cookies on file")
     else:
-        lines.append("TikTok/Facebook downloads: not set up — run /cookies")
+        lines.append("TikTok/Facebook downloads: not set up, so run /cookies")
 
     # Admin status — env allow-list first, then the linked-console cache, so
     # the source named in the reply is the one that actually granted rights.

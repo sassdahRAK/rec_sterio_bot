@@ -14,7 +14,7 @@ from bot.handlers.merge import (
     watch_gemini_then_merge,
     watch_merge,
 )
-from tests.conftest import FakeContext, FakeUpdate
+from tests.conftest import FakeBot, FakeContext, FakeUpdate
 
 
 def _ctx(client, args=None) -> FakeContext:
@@ -34,6 +34,9 @@ def _video(backend, *, whisper=True, gemini=False) -> str:
         "file_size": 10,
         "duration_seconds": 5.0,
         "transcripts": [],
+        # The default test update acts as Telegram user 42; ownership is
+        # enforced on content routes now, so the unit must be theirs.
+        "created_by": "telegram:42",
     }
     if whisper:
         backend.add_transcript(video_id, "hello world", 1, "whisper")
@@ -159,6 +162,36 @@ async def test_merge_reports_backend_error(api_client, backend):
     await merge_mod.merge_command(update, _ctx(api_client, [video_id]))
     # fail_next is consumed by the generate call; the flow still enqueues Gemini.
     assert update.message.replies
+
+
+@pytest.mark.asyncio
+async def test_watch_merge_polls_with_the_initiating_user(api_client, backend):
+    """Every poll carries the Telegram user who started the merge, so the
+    backend evaluates their access rather than the bot's service identity."""
+    video_id = _video(backend, gemini=True)  # created_by telegram:42
+    context = _ctx(api_client, [video_id])
+    await merge_mod.merge_command(FakeUpdate(), context)
+    merge_id = next(iter(backend.merges))
+
+    status = await watch_merge(
+        api_client,
+        FakeBot(),
+        FakeUpdate().message.chat_id,
+        merge_id,
+        requested_by="telegram:42",
+    )
+
+    assert status == "ready"
+    polls = [
+        r for r in backend.requests if r["path"] == f"/api/v1/merges/{merge_id}"
+    ]
+    assert polls, "the watcher must poll the merge"
+    assert all(r["requested_by"] == "telegram:42" for r in polls), (
+        "a dropped identity would poll as the service and regress silently"
+    )
+    registry = context.bot_data.get("merge_watchers")
+    if registry is not None:
+        await registry.cancel_all()
 
 
 # --------------------------------------------------------------- merges
@@ -317,7 +350,7 @@ async def test_callback_audio_sends_the_mp3(api_client, backend):
     same path the ``status:`` branch already uses.
     """
     video = await api_client.create_video(
-        "https://youtu.be/audio-callback", requested_by="telegram:1"
+        "https://youtu.be/audio-callback", requested_by="telegram:42"
     )
     video_id = video["id"]
     # Walk the fake backend's status script to its end, the way /audio tests

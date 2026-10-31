@@ -84,7 +84,7 @@ async def test_the_guard_is_released_so_a_later_tap_works(api_client):
     delivery is observable. Release is what makes the second tap possible.
     """
     video = await api_client.create_video(
-        "https://youtu.be/double-tap-audio", requested_by="telegram:1"
+        "https://youtu.be/double-tap-audio", requested_by="telegram:42"
     )
     video_id = video["id"]
     for _ in range(4):

@@ -24,6 +24,7 @@ from ..helpers import (
     escape_markdown,
     get_client,
     is_uuid,
+    portal_token_for,
     web_links,
 )
 from ..inflight import get_inflight
@@ -98,7 +99,7 @@ def format_merge(merge: Mapping[str, Any]) -> str:
     """Render a merge object, including the diff summary when it is ready."""
     status = str(merge.get("status") or "?")
     merge_id = str(merge.get("id") or "?")
-    lines = [f"*Merge* `{merge_id[:8]}` — `{status}`"]
+    lines = [f"*Merge* `{merge_id[:8]}`: `{status}`"]
     if merge.get("model"):
         lines.append(f"Model: `{escape_markdown(str(merge['model']))}`")
 
@@ -187,7 +188,7 @@ async def _watch_or_run(
         await coro
         return
     if not trackers.start(key, coro):
-        await message.reply_text("That merge is already being watched — hang tight.")
+        await message.reply_text("That merge is already being watched, so hang tight.")
 
 
 async def watch_merge(
@@ -196,17 +197,23 @@ async def watch_merge(
     chat_id: int,
     merge_id: str,
     *,
+    requested_by: str | None = None,
     interval: float = 5.0,
     timeout: float = MERGE_WAIT_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> str:
-    """Poll a merge until it settles, then report it with an Apply button."""
+    """Poll a merge until it settles, then report it with an Apply button.
+
+    *requested_by* is the Telegram user who started the merge; every poll
+    carries it, so the backend evaluates that user's access to the merge's
+    video instead of the bot's service identity.
+    """
     deadline = clock() + timeout
     status = "unknown"
     while clock() < deadline:
         try:
-            merge = await client.get_merge(merge_id)
+            merge = await client.get_merge(merge_id, requested_by=requested_by)
         except ApiError as exc:
             await _safe_send(
                 bot, chat_id, f"Could not check merge: {exc.user_message()}",
@@ -268,7 +275,7 @@ async def watch_gemini_then_merge(
     deadline = clock() + timeout
     while clock() < deadline:
         try:
-            video = await client.get_video(video_id)
+            video = await client.get_video(video_id, requested_by=requested_by)
         except ApiError as exc:
             await _safe_send(
                 bot, chat_id, f"Could not check video: {exc.user_message()}",
@@ -325,10 +332,17 @@ async def watch_gemini_then_merge(
             await _safe_send(
                 bot,
                 chat_id,
-                f"Gemini transcript ready — merge `{merge_id[:8]}` queued.",
+                f"Gemini transcript ready. Merge `{merge_id[:8]}` queued.",
                 parse_mode=ParseMode.MARKDOWN,
             )
-            return await watch_merge(client, bot, chat_id, merge_id, interval=interval)
+            return await watch_merge(
+                client,
+                bot,
+                chat_id,
+                merge_id,
+                requested_by=requested_by,
+                interval=interval,
+            )
 
         await sleep(interval)
 
@@ -366,8 +380,11 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text(BOT_NOT_READY)
         return
 
+    # Every call below names the requesting user, so the backend evaluates
+    # their access to the video rather than the bot's service identity.
+    requested_by = actor_for(update)
     try:
-        video = await client.get_video(video_id)
+        video = await client.get_video(video_id, requested_by=requested_by)
     except ApiError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
@@ -390,7 +407,7 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if gemini is None:
         try:
             await client.generate_transcript(
-                video_id, "gemini", requested_by=actor_for(update)
+                video_id, "gemini", requested_by=requested_by
             )
         except ApiError as exc:
             await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
@@ -400,7 +417,7 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         await message.reply_text(
-            f"No Gemini transcript yet for `{video_id}` — queued it now.\n"
+            f"No Gemini transcript yet for `{video_id}`, so I queued it now.\n"
             "I will start the merge automatically as soon as it is ready.",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -408,7 +425,7 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             context,
             f"gemini:{video_id}",
             watch_gemini_then_merge(
-                client, context.bot, message.chat_id, video_id, requested_by=actor_for(update)
+                client, context.bot, message.chat_id, video_id, requested_by=requested_by
             ),
             message,
         )
@@ -420,7 +437,7 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             base_transcript_id=str(base.get("id") or "") or None,
             gemini_transcript_id=str(gemini.get("id") or "") or None,
             model=model,
-            requested_by=actor_for(update),
+            requested_by=requested_by,
         )
     except ApiError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
@@ -443,7 +460,13 @@ async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _watch_or_run(
         context,
         f"merge:{merge_id}",
-        watch_merge(client, context.bot, message.chat_id, merge_id),
+        watch_merge(
+            client,
+            context.bot,
+            message.chat_id,
+            merge_id,
+            requested_by=requested_by,
+        ),
         message,
     )
 
@@ -472,7 +495,9 @@ async def merges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        payload = await client.list_merges(video_id)
+        payload = await client.list_merges(
+            video_id, requested_by=actor_for(update)
+        )
     except ApiError as exc:
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
@@ -488,7 +513,7 @@ async def merges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    lines = [f"*Merges* for `{video_id}` — {len(items)} total"]
+    lines = [f"*Merges* for `{video_id}`: {len(items)} total"]
     for item in items:
         if not isinstance(item, Mapping):
             continue
@@ -577,7 +602,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         client = get_client(context)
     except RuntimeError:
         await query.answer(
-            text="That did not work — please try again.", show_alert=True
+            text="That did not work, so please try again.", show_alert=True
         )
         return
 
@@ -590,7 +615,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         key = f"{action}:{query.message.chat_id if query.message else 0}:{arg}"
         if not await guard.claim(key):
             await query.answer(
-                text="Already working on that — one moment.", show_alert=False
+                text="Already working on that. One moment.", show_alert=False
             )
             return
 
@@ -615,12 +640,31 @@ async def _dispatch(
             # The media endpoint is authenticated, so the bot fetches the bytes
             # with its own token and uploads them to the chat.
             await query.answer("Fetching the media…")
+            # Same attribution as /media: the video read and the token mint
+            # both name this Telegram user, so a 403 withholds the link.
+            requested_by = actor_for(update)
+            try:
+                video = await client.get_video(arg, requested_by=requested_by)
+            except (ApiError, ApiNetworkError):
+                video = {}
+            portal = await portal_token_for(
+                client, arg, requested_by=requested_by
+            )
             await media_handler.deliver_media(
                 context.bot,
                 query.message.chat_id,
                 client,
                 arg,
-                reply_markup=web_links(update, context, video_id=arg),
+                video=video,
+                requested_by=requested_by,
+                reply_markup=web_links(
+                    update,
+                    context,
+                    video=video,
+                    video_id=arg,
+                    token=portal.token,
+                    allow_portal=portal.linkable(confirmed=bool(video)),
+                ),
             )
             return
 
@@ -661,7 +705,9 @@ async def _dispatch(
             return
 
         if action == "mcheck" and arg:
-            merge = await client.get_merge(arg)
+            # The button was tapped by a Telegram user, so the merge read names
+            # them: the backend evaluates their access to the merge's video.
+            merge = await client.get_merge(arg, requested_by=actor_for(update))
             await query.answer()
             if query.message is not None:
                 await query.message.reply_text(
@@ -677,7 +723,9 @@ async def _dispatch(
 
         if action == "mlist" and arg:
             await query.answer()
-            payload = await client.list_merges(arg)
+            payload = await client.list_merges(
+                arg, requested_by=actor_for(update)
+            )
             items = _items(payload)
             if query.message is not None:
                 await query.message.reply_text(

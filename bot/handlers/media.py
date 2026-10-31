@@ -29,12 +29,14 @@ from ..client import (
 )
 from ..helpers import (
     BOT_NOT_READY,
+    actor_for,
     escape_markdown,
     format_bytes,
     get_client,
     get_settings_or_default,
     is_uuid,
     portal_button,
+    portal_token_for,
     portal_url,
     web_links,
 )
@@ -85,7 +87,7 @@ def _explain_missing_media(video: Mapping[str, Any], video_id: str) -> str:
         progress = video.get("progress")
         pct = f" ({progress}%)" if isinstance(progress, int) else ""
         return (
-            f"⏳ The download is still in progress{pct} — the file is not on disk yet.\n"
+            f"⏳ The download is still in progress{pct}, so the file is not on disk yet.\n"
             f"Video `{video_id}`. Try /media again in a moment, or /status {video_id}."
         )
 
@@ -110,7 +112,7 @@ def _explain_missing_media(video: Mapping[str, Any], video_id: str) -> str:
     if status == "transcribing":
         return (
             f"⏳ The media for `{video_id}` is being transcribed. The file itself "
-            f"should already exist — try /media again, or /status {video_id}."
+            f"should already exist, so try /media again, or /status {video_id}."
         )
 
     text = (
@@ -125,19 +127,24 @@ def _explain_missing_media(video: Mapping[str, Any], video_id: str) -> str:
     return text
 
 
-def _portal_link_markup(video_id: str) -> InlineKeyboardMarkup | None:
+def _portal_link_markup(
+    video_id: str, token: str | None = None
+) -> InlineKeyboardMarkup | None:
     """A one-button keyboard pointing at the unit's portal page, if possible."""
-    button = portal_button(video_id)
+    button = portal_button(video_id, token=token)
     return InlineKeyboardMarkup([[button]]) if button is not None else None
 
 
 async def _explain_too_large(
     bot: Any,
     chat_id: int,
+    client: Any,
     video_id: str,
     size: int | None,
     reply_markup: InlineKeyboardMarkup | None,
     video: Mapping[str, Any] | None = None,
+    *,
+    requested_by: str | None = None,
 ) -> None:
     """Say why the file is not coming, and put the portal page in reach.
 
@@ -150,16 +157,29 @@ async def _explain_too_large(
     which Telegram refuses in a button — does it fall back to naming the
     console and the id instead of promising a link that is not there.
     """
-    markup = reply_markup or _portal_link_markup(video_id)
+    # An unfiled unit's page is empty for a browser visitor, so the token is
+    # minted for this notice too, as the same Telegram user — once, shared by
+    # the button and the text. A 403 removes the link entirely: this notice
+    # is only reached for a unit the caller asked about, not one they own.
+    portal = await portal_token_for(
+        client, video_id, requested_by=requested_by
+    )
+    allowed = portal.linkable(confirmed=bool(video))
+    if allowed:
+        markup = reply_markup or _portal_link_markup(video_id, portal.token)
+    else:
+        # A 403 drops the caller's keyboard too: it may carry a portal button
+        # minted before the refusal, and fail-closed means no such link.
+        markup = None
     lead = (
-        f"The file is {format_bytes(size)} — too large for Telegram to carry "
+        f"The file is {format_bytes(size)}, which is too large for Telegram to carry "
         f"(a bot can upload at most {format_bytes(MAX_UPLOAD_BYTES)})."
         if size is not None
         else f"This file is too large for Telegram to carry (a bot can upload at most "
         f"{format_bytes(MAX_UPLOAD_BYTES)})."
     )
     settings = get_settings_or_default()
-    lines = [lead, _portal_fallback(settings, video_id, video)]
+    lines = [lead, _portal_fallback(settings, video_id, video, portal.token, allowed)]
     lines.append(f"Video `{video_id}`.")
     await bot.send_message(
         chat_id=chat_id,
@@ -170,18 +190,24 @@ async def _explain_too_large(
 
 
 def _portal_fallback(
-    settings: Any, video_id: str, video: Mapping[str, Any] | None = None
+    settings: Any,
+    video_id: str,
+    video: Mapping[str, Any] | None = None,
+    token: str | None = None,
+    allowed: bool = True,
 ) -> str:
     """The "where to get it instead" sentence, with the real address in it.
 
     An unfiled unit is in no folder, so it is not part of the public dataset
     and the portal shows it only to its creator (or an admin) — the visitor
     must sign in first. Saying so beats a link that answers "isn't available".
+    *allowed* is false when the backend refused this user the unit; then no
+    address is spelled out at all, because the page would only reject them.
     """
-    portal = portal_url(video_id, settings)
+    portal = portal_url(video_id, settings, token=token) if allowed else None
     if not portal:
         return f"An admin can download it from the console (`{video_id}`)."
-    text = f"Open it in the portal — watch or download it there:\n{portal}"
+    text = f"Open it in the portal to watch or download it:\n{portal}"
     if isinstance(video, Mapping) and not video.get("folder_id"):
         text += "\nIt is not in a folder yet, so sign in as the account that owns it."
     return text
@@ -190,10 +216,13 @@ def _portal_fallback(
 async def _explain_upload_failed(
     bot: Any,
     chat_id: int,
+    client: Any,
     video_id: str,
     exc: BaseException,
     reply_markup: InlineKeyboardMarkup | None,
     video: Mapping[str, Any] | None = None,
+    *,
+    requested_by: str | None = None,
 ) -> None:
     """A failed Telegram transfer still gets an explanation and the way in.
 
@@ -203,7 +232,14 @@ async def _explain_upload_failed(
     reply points at the portal page where it can be watched or downloaded
     instead of leaving a bare error string.
     """
-    markup = reply_markup or _portal_link_markup(video_id)
+    portal = await portal_token_for(
+        client, video_id, requested_by=requested_by
+    )
+    allowed = portal.linkable(confirmed=bool(video))
+    if allowed:
+        markup = reply_markup or _portal_link_markup(video_id, portal.token)
+    else:
+        markup = None
     timed_out = "timed out" in str(exc).lower() or "timeout" in type(exc).__name__.lower()
     lead = (
         "The upload to Telegram timed out."
@@ -213,7 +249,9 @@ async def _explain_upload_failed(
     lines = [
         f"{lead} The video itself is fine — this network's link to Telegram "
         "is what failed.",
-        _portal_fallback(get_settings_or_default(), video_id, video),
+        _portal_fallback(
+            get_settings_or_default(), video_id, video, portal.token, allowed
+        ),
         f"Video `{video_id}`.",
     ]
     try:
@@ -238,6 +276,7 @@ async def _send_document_and_record(
     reply_markup: InlineKeyboardMarkup | None,
     *,
     compressed: bool = False,
+    requested_by: str | None = None,
 ) -> bool:
     """Send *payload* as a document and record the copy Telegram stores.
 
@@ -251,12 +290,12 @@ async def _send_document_and_record(
     """
     filename = _filename(video, video_id) if isinstance(video, Mapping) else f"{video_id}.mp4"
     kind = "compressed delivery copy, " if compressed else ""
-    caption = f"Video `{video_id}` — {kind}{format_bytes(len(payload))}"
+    caption = f"Video `{video_id}`: {kind}{format_bytes(len(payload))}"
     if isinstance(refetch_size, int) and refetch_size > MAX_REFETCH_BYTES:
         # Past Telegram's 20 MB `getFile` ceiling: the copy can be re-sent to
         # any chat, but the bot can never download those bytes back.
         caption += (
-            " — Telegram can re-send this copy, but the bot cannot"
+            ". Telegram can re-send this copy, but the bot cannot"
             " fetch it back (20 MB limit)"
         )
     try:
@@ -275,12 +314,28 @@ async def _send_document_and_record(
             # `file_size` is not always recorded, so the pre-check above can
             # miss a big file and only Telegram's own limit catches it.
             await _explain_too_large(
-                bot, chat_id, video_id, len(payload), reply_markup, video
+                bot,
+                chat_id,
+                client,
+                video_id,
+                len(payload),
+                reply_markup,
+                video,
+                requested_by=requested_by,
             )
             return False
         # Slow link, a dropped connection or a Telegram 5xx — the unit is fine,
         # so say what failed and hand over the portal page.
-        await _explain_upload_failed(bot, chat_id, video_id, exc, reply_markup, video)
+        await _explain_upload_failed(
+            bot,
+            chat_id,
+            client,
+            video_id,
+            exc,
+            reply_markup,
+            video,
+            requested_by=requested_by,
+        )
         return False
 
     # instruction.txt #4: link the Telegram copy back to the catalogue. Only a
@@ -292,7 +347,10 @@ async def _send_document_and_record(
     if file_id:
         try:
             await client.link_telegram(
-                video_id, file_id, message_id=getattr(sent, "message_id", None)
+                video_id,
+                file_id,
+                message_id=getattr(sent, "message_id", None),
+                requested_by=requested_by,
             )
         except (ApiError, ApiNetworkError) as exc:
             # Recording the reference is a convenience; the delivery already
@@ -321,6 +379,8 @@ async def _deliver_oversize(
     video: Mapping[str, Any] | None,
     size: int | None,
     reply_markup: InlineKeyboardMarkup | None,
+    *,
+    requested_by: str | None = None,
 ) -> bool:
     """Deliver a unit Telegram refuses at full size, via its compressed copy.
 
@@ -349,6 +409,7 @@ async def _deliver_oversize(
                 tmp.name,
                 max_bytes=MAX_UPLOAD_BYTES,
                 variant=COMPRESSED_VARIANT,
+                requested_by=requested_by,
             )
         except CompressedNotReadyError:
             logger.info("no media on disk at all for %s yet", video_id)
@@ -364,7 +425,16 @@ async def _deliver_oversize(
                 exc.size_seen,
                 MAX_UPLOAD_BYTES,
             )
-            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            await _explain_too_large(
+                bot,
+                chat_id,
+                client,
+                video_id,
+                size,
+                reply_markup,
+                video,
+                requested_by=requested_by,
+            )
             return False
         except (ApiError, ApiNetworkError) as exc:
             if getattr(exc, "status_code", None) == 404 and getattr(exc, "code", None) == (
@@ -375,11 +445,29 @@ async def _deliver_oversize(
                 await _explain_no_media(bot, chat_id, video, video_id)
                 return False
             logger.warning("compressed copy for %s is not available: %s", video_id, exc)
-            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            await _explain_too_large(
+                bot,
+                chat_id,
+                client,
+                video_id,
+                size,
+                reply_markup,
+                video,
+                requested_by=requested_by,
+            )
             return False
 
         if not written:
-            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            await _explain_too_large(
+                bot,
+                chat_id,
+                client,
+                video_id,
+                size,
+                reply_markup,
+                video,
+                requested_by=requested_by,
+            )
             return False
         if not compressed:
             # X-Compressed: false — no copy exists and the backend served the
@@ -390,7 +478,16 @@ async def _deliver_oversize(
                 "(X-Compressed: false); not sent, pointed at the portal",
                 video_id,
             )
-            await _explain_too_large(bot, chat_id, video_id, size, reply_markup, video)
+            await _explain_too_large(
+                bot,
+                chat_id,
+                client,
+                video_id,
+                size,
+                reply_markup,
+                video,
+                requested_by=requested_by,
+            )
             return False
 
         logger.info(
@@ -412,10 +509,13 @@ async def _deliver_oversize(
         len(payload),
         reply_markup,
         compressed=True,
+        requested_by=requested_by,
     )
 
 
-async def _stream_original(client: Any, video_id: str) -> bytes | None:
+async def _stream_original(
+    client: Any, video_id: str, *, requested_by: str | None = None
+) -> bytes | None:
     """Fetch an unknown-size original without ever holding it all in RAM.
 
     ``file_size`` is not always recorded, and the bot used to pull the whole
@@ -424,11 +524,17 @@ async def _stream_original(client: Any, video_id: str) -> bytes | None:
     a unit past it is abandoned mid-body (None returned — the caller then
     tries the compressed copy), and anything the cap allowed is small enough
     to send. Telegram's 413 stays as the safety net for a size that lied.
+
+    *requested_by* names the Telegram user on the wire, so the backend can
+    refuse a unit they have no right to instead of serving it as the service.
     """
     with tempfile.NamedTemporaryFile(prefix="recsterio-", suffix=".part") as tmp:
         try:
             written = await client.download_media_to(
-                video_id, tmp.name, max_bytes=MAX_UPLOAD_BYTES
+                video_id,
+                tmp.name,
+                max_bytes=MAX_UPLOAD_BYTES,
+                requested_by=requested_by,
             )
         except OversizeMediaError:
             return None
@@ -445,6 +551,7 @@ async def deliver_media(
     video: Mapping[str, Any] | None = None,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
+    requested_by: str | None = None,
 ) -> bool:
     """Fetch the media through the API and upload it to the chat.
 
@@ -457,7 +564,7 @@ async def deliver_media(
     """
     if video is None:
         try:
-            video = await client.get_video(video_id)
+            video = await client.get_video(video_id, requested_by=requested_by)
         except (ApiError, ApiNetworkError):
             video = {}
 
@@ -465,7 +572,14 @@ async def deliver_media(
     if isinstance(size, int) and size > MAX_UPLOAD_BYTES:
         # Telegram cannot carry the original at all — try the compressed copy.
         return await _deliver_oversize(
-            bot, chat_id, client, video_id, video, size, reply_markup
+            bot,
+            chat_id,
+            client,
+            video_id,
+            video,
+            size,
+            reply_markup,
+            requested_by=requested_by,
         )
 
     payload: bytes | None
@@ -473,13 +587,15 @@ async def deliver_media(
         if isinstance(size, int):
             # The recorded size is inside the limit — the original is safe to
             # fetch whole and send, as before.
-            payload = await client.get_media(video_id)
+            payload = await client.get_media(video_id, requested_by=requested_by)
         else:
             # `file_size` was never recorded — fetch by streaming instead of
             # trusting the request: an oversize body is abandoned past the
             # upload cap and the compressed copy is tried, so RAM (and the
             # wire) only ever carry what could actually be sent.
-            payload = await _stream_original(client, video_id)
+            payload = await _stream_original(
+                client, video_id, requested_by=requested_by
+            )
     except ApiError as exc:
         if exc.status_code == 404:
             # A 404 means there is no file on disk. Say *why*: still working on
@@ -497,7 +613,7 @@ async def deliver_media(
                     await bot.send_document(
                         chat_id=chat_id,
                         document=telegram_file_id,
-                        caption=f"Video `{video_id}` — re-sent from the Telegram copy",
+                        caption=f"Video `{video_id}`: re-sent from the Telegram copy",
                         parse_mode=ParseMode.MARKDOWN,
                         reply_markup=reply_markup,
                     )
@@ -529,7 +645,14 @@ async def deliver_media(
         # what arrived cannot be sent, and the rest was never pulled. The same
         # compressed-copy attempt an oversize `file_size` gets.
         return await _deliver_oversize(
-            bot, chat_id, client, video_id, video, None, reply_markup
+            bot,
+            chat_id,
+            client,
+            video_id,
+            video,
+            None,
+            reply_markup,
+            requested_by=requested_by,
         )
 
     if not payload:
@@ -540,7 +663,15 @@ async def deliver_media(
         return False
 
     return await _send_document_and_record(
-        bot, chat_id, client, video_id, video, payload, size, reply_markup
+        bot,
+        chat_id,
+        client,
+        video_id,
+        video,
+        payload,
+        size,
+        reply_markup,
+        requested_by=requested_by,
     )
 
 
@@ -568,18 +699,33 @@ async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await message.reply_text(f"Fetching the media for `{video_id}`…", parse_mode=ParseMode.MARKDOWN)
     # The link buttons need the video's folder, so the dict is fetched here
-    # and handed to deliver_media (which then skips its own fetch).
+    # and handed to deliver_media (which then skips its own fetch). Both the
+    # fetch and the token mint carry this Telegram user so the backend can
+    # refuse a unit they have no right to; an empty video dict then also
+    # withholds the bare link if the endpoint could not vouch for access.
+    requested_by = actor_for(update)
     try:
-        video = await client.get_video(video_id)
+        video = await client.get_video(video_id, requested_by=requested_by)
     except (ApiError, ApiNetworkError):
         video = {}
+    portal = await portal_token_for(
+        client, video_id, requested_by=requested_by
+    )
     await deliver_media(
         context.bot,
         message.chat_id,
         client,
         video_id,
         video=video,
-        reply_markup=web_links(update, context, video=video, video_id=video_id),
+        requested_by=requested_by,
+        reply_markup=web_links(
+            update,
+            context,
+            video=video,
+            video_id=video_id,
+            token=portal.token,
+            allow_portal=portal.linkable(confirmed=bool(video)),
+        ),
     )
 
 
@@ -608,19 +754,21 @@ async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text(f"Fetching the audio for `{video_id}`…", parse_mode=ParseMode.MARKDOWN)
 
     # Request-only by design: no watcher, no auto-delivery — the mp3 goes out
-    # when a user asks for it, never on its own.
+    # when a user asks for it, never on its own. Both reads name this Telegram
+    # user, so the backend evaluates their access rather than the bot's.
+    requested_by = actor_for(update)
     try:
-        video = await client.get_video(video_id)
+        video = await client.get_video(video_id, requested_by=requested_by)
     except (ApiError, ApiNetworkError):
         video = {}
     title = str(video.get("title") or "").strip() if isinstance(video, Mapping) else ""
 
     try:
-        payload = await client.get_audio(video_id)
+        payload = await client.get_audio(video_id, requested_by=requested_by)
     except ApiError as exc:
         if exc.status_code == 404:
             await message.reply_text(
-                f"The mp3 for `{video_id}` has not been extracted yet — "
+                f"The mp3 for `{video_id}` has not been extracted yet. "
                 f"/status `{video_id}` shows where it is.",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -643,7 +791,7 @@ async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             chat_id=message.chat_id,
             document=payload,
             filename=f"{video_id}.mp3",
-            caption=f"Audio (mp3) — `{label}`",
+            caption=f"Audio (mp3): `{label}`",
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as exc:  # noqa: BLE001 - a failed upload must not crash the bot

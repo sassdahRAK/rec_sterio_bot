@@ -21,6 +21,7 @@ from ..helpers import (
     get_client,
     is_admin,
     is_uuid,
+    portal_token_for,
     web_links,
 )
 from ..keyboards import jobs_keyboard
@@ -53,6 +54,9 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if args and args[0].lower() in {"failed", "dead", "queued", "running", "succeeded"}:
         status_filter = args[0].lower()
 
+    # Deliberately no ``requested_by``: the bot's admin gate above is the
+    # authorization for this operator surface, and the backend is meant to see
+    # the service identity here (the admin may not own every job's video).
     try:
         payload = await client.list_jobs(page_size=20, status=status_filter)
     except ApiError as exc:
@@ -129,7 +133,7 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # file. The API now refuses; say that plainly rather than echoing a
             # machine code.
             await message.reply_text(
-                "That video is already queued for download — nothing to retry.\n"
+                "That video is already queued for download, so there is nothing to retry.\n"
                 f"Use /status {video_id} to watch it.",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -140,7 +144,24 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    links = web_links(update, context, video_id=video_id)
+    # Deliberately no ``requested_by`` on any call from /retry: the bot's
+    # admin gate above is the authorization, and the backend must see the
+    # service identity so it can act on a video the admin does not own. The
+    # watch started below stays on that same identity for the same reason —
+    # otherwise delivery of a non-owned video would be refused.
+    try:
+        video = await client.get_video(video_id)
+    except (ApiError, ApiNetworkError):
+        video = {}
+    portal = await portal_token_for(client, video_id)
+    links = web_links(
+        update,
+        context,
+        video=video,
+        video_id=video_id,
+        token=portal.token,
+        allow_portal=portal.linkable(confirmed=bool(video)),
+    )
     await message.reply_text(
         "♻️ Re-queued video `{vid}`.\nJob `{job}` · status `{status}`.\n"
         "I will watch it and send the media here once it is ready.".format(
@@ -156,7 +177,13 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # the same background watch a fresh link gets: the media is delivered at
     # `downloaded` and the "Transcribed" notice arrives at the terminal status.
     # The links computed above travel with the watch, like they do for a link.
-    start_watch(context, client, update.effective_chat.id, video_id, reply_markup=links)
+    start_watch(
+        context,
+        client,
+        update.effective_chat.id,
+        video_id,
+        reply_markup=links,
+    )
 
 
 async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,12 +235,27 @@ async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if isinstance(job, Mapping):
         job_video_id = job.get("video_id")
         if job.get("kind") == "download" and job_video_id:
+            # Deliberately no ``requested_by`` (see /retry): the admin gate is
+            # the authorization and this watch must deliver a video the admin
+            # may not own, so it stays on the service identity throughout.
+            try:
+                video = await client.get_video(str(job_video_id))
+            except (ApiError, ApiNetworkError):
+                video = {}
+            portal = await portal_token_for(client, str(job_video_id))
             start_watch(
                 context,
                 client,
                 update.effective_chat.id,
                 str(job_video_id),
-                reply_markup=web_links(update, context, video_id=str(job_video_id)),
+                reply_markup=web_links(
+                    update,
+                    context,
+                    video=video,
+                    video_id=str(job_video_id),
+                    token=portal.token,
+                    allow_portal=portal.linkable(confirmed=bool(video)),
+                ),
             )
 
 

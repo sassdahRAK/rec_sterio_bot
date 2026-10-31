@@ -53,7 +53,11 @@ async def test_long_transcript_is_sent_as_a_document(api_client, backend):
 
 async def test_transcript_reply_carries_the_web_links(api_client, backend):
     """/transcript fetches the video too, so its reply can link to both apps."""
-    video = await api_client.create_video("https://youtu.be/linked", requested_by="telegram:1")
+    # Created by the same admin who reads it: after the ownership fix a user
+    # only sees units they own (or that are filed in a public folder).
+    video = await api_client.create_video(
+        "https://youtu.be/linked", requested_by="telegram:999"
+    )
     backend.add_transcript(video["id"], "Linked transcript.")
     folder = backend.add_folder("Transcript folder")
     backend.videos[video["id"]]["folder_id"] = folder["id"]
@@ -64,7 +68,8 @@ async def test_transcript_reply_carries_the_web_links(api_client, backend):
 
     markup = update.message.replies[0]["reply_markup"]
     urls = [b.url for row in markup.inline_keyboard for b in row]
-    assert f"https://portal.test/video/{video['id']}" in urls
+    portal = f"https://portal.test/video/{video['id']}"
+    assert any(url and url.startswith(portal) and "?t=" in url for url in urls)
     assert f"https://console.test/videos/{video['id']}" in urls
 
 
@@ -92,6 +97,27 @@ async def test_transcripts_lists_versions(api_client, backend):
     text = update.message.replies[0]["text"]
     assert "Transcript versions" in text
     assert "v1" in text
+
+
+async def test_transcript_refuses_someone_elses_video(api_client, backend):
+    """Reading another user's transcript is refused, and the text never leaks."""
+    video = await api_client.create_video(
+        "https://youtu.be/foreign", requested_by="telegram:1"
+    )
+    backend.add_transcript(video["id"], "Not yours to read.")
+
+    update = FakeUpdate(user_id=42)
+    ctx = _context(api_client, args=[video["id"]])
+    await transcript_command(update, ctx)
+
+    text = update.message.replies[-1]["text"]
+    assert "access" in text.lower(), "the refusal must be explained to the user"
+    assert "Not yours to read." not in text, "the transcript must never leak"
+    reads = [
+        r for r in backend.requests
+        if r["path"] == f"/api/v1/videos/{video['id']}/transcript"
+    ]
+    assert reads and reads[0]["requested_by"] == "telegram:42"
 
 
 async def test_transcript_requires_a_video_id(api_client):

@@ -13,7 +13,14 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ..client import ApiError, ApiNetworkError
-from ..helpers import BOT_NOT_READY, actor_for, format_bytes, get_client, web_links
+from ..helpers import (
+    BOT_NOT_READY,
+    actor_for,
+    format_bytes,
+    get_client,
+    portal_token_for,
+    web_links,
+)
 from ..keyboards import video_keyboard
 from .links import start_watch
 
@@ -65,7 +72,7 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     if isinstance(declared, int) and declared > TELEGRAM_MAX_DOWNLOAD:
         await message.reply_text(
             f"That file is {format_bytes(declared)}. Telegram only lets a bot "
-            f"download up to {format_bytes(TELEGRAM_MAX_DOWNLOAD)} — upload larger "
+            f"download up to {format_bytes(TELEGRAM_MAX_DOWNLOAD)}, so upload larger "
             "files from the admin dashboard instead."
         )
         return
@@ -107,9 +114,22 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    links = web_links(update, context, video=video, markup=video_keyboard(video_id))
+    requested_by = actor_for(update)
+    portal = await portal_token_for(
+        client, video_id, requested_by=requested_by
+    )
+    links = web_links(
+        update,
+        context,
+        video=video,
+        markup=video_keyboard(video_id),
+        token=portal.token,
+        # `video` is the row this upload just created as the same user, so
+        # the bare-page fallback is vouched for.
+        allow_portal=portal.linkable(confirmed=bool(video)),
+    )
     await notice.edit_text(
-        f"✅ Uploaded — video id `{video_id}`\n"
+        f"✅ Uploaded. Video id `{video_id}`\n"
         f"Size: {format_bytes(video.get('file_size'))}  |  "
         f"Status: `{video.get('status')}`\n\n"
         f"I will notify you when the transcript is ready.",
@@ -119,4 +139,12 @@ async def handle_media_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # The user already has this file: no "Download complete" notice and no
     # echo of the media — the transcript-ready notification is the payoff.
-    start_watch(context, client, message.chat_id, video_id, deliver=False, reply_markup=links)
+    start_watch(
+        context,
+        client,
+        message.chat_id,
+        video_id,
+        deliver=False,
+        reply_markup=links,
+        requested_by=requested_by,
+    )
