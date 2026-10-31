@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 from ..client import ApiError, ApiNetworkError
 from ..helpers import (
     BOT_NOT_READY,
+    actor_for,
     escape_markdown,
     get_client,
     is_admin,
@@ -144,16 +145,23 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Deliberately no ``requested_by`` on any call from /retry: the bot's
-    # admin gate above is the authorization, and the backend must see the
-    # service identity so it can act on a video the admin does not own. The
-    # watch started below stays on that same identity for the same reason —
-    # otherwise delivery of a non-owned video would be refused.
+    # The calls below split on purpose. The retry, the video read and the
+    # watch started afterwards stay header-less: the bot's admin gate above is
+    # their authorization, and the backend must see the service identity so it
+    # can act on and deliver a video the admin does not own. The portal-token
+    # mint is different: the backend refuses the bare service identity and
+    # requires an admin-tier principal or the unit's creator, so it must carry
+    # the admin's own identity. A linked console admin resolves to their real
+    # role server-side and the mint succeeds; an unlinked
+    # ``ADMIN_TELEGRAM_IDS`` admin cannot be verified there and fails closed,
+    # leaving the reply without the portal button.
     try:
         video = await client.get_video(video_id)
     except (ApiError, ApiNetworkError):
         video = {}
-    portal = await portal_token_for(client, video_id)
+    portal = await portal_token_for(
+        client, video_id, requested_by=actor_for(update)
+    )
     links = web_links(
         update,
         context,
@@ -235,14 +243,18 @@ async def jobretry_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if isinstance(job, Mapping):
         job_video_id = job.get("video_id")
         if job.get("kind") == "download" and job_video_id:
-            # Deliberately no ``requested_by`` (see /retry): the admin gate is
-            # the authorization and this watch must deliver a video the admin
-            # may not own, so it stays on the service identity throughout.
+            # Same split as /retry: the video read and the watch it starts
+            # stay on the service identity (the admin gate authorizes them and
+            # they must deliver a video the admin may not own), while the
+            # portal-token mint carries the admin's own identity because the
+            # backend verifies that caller rather than the service.
             try:
                 video = await client.get_video(str(job_video_id))
             except (ApiError, ApiNetworkError):
                 video = {}
-            portal = await portal_token_for(client, str(job_video_id))
+            portal = await portal_token_for(
+                client, str(job_video_id), requested_by=actor_for(update)
+            )
             start_watch(
                 context,
                 client,

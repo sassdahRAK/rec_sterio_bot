@@ -156,7 +156,9 @@ async def test_queued_reply_carries_the_console_link_for_an_admin(api_client, ba
 
 async def test_queued_reply_carries_the_portal_link_for_a_filed_video(api_client, backend):
     """A duplicate URL returns the *existing* video — one that can be filed."""
-    video = await api_client.create_video("https://youtu.be/filed", requested_by="telegram:7")
+    # Owned by the reader: the portal-token mint only succeeds for the unit's
+    # creator (or a console admin), exactly as the backend enforces.
+    video = await api_client.create_video("https://youtu.be/filed", requested_by="telegram:42")
     folder = backend.add_folder("Fieldwork")
     backend.videos[video["id"]]["folder_id"] = folder["id"]
 

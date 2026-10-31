@@ -137,10 +137,11 @@ async def test_admin_retry_starts_a_watch_that_delivers_the_media(api_client, ba
     assert backend.telegram_links[0]["file_id"].startswith("file-")
 
 
-async def test_admin_retry_stays_on_the_service_identity_end_to_end(api_client, backend):
-    """The admin gate is the authorization: /retry and the watch it starts must
-    never send X-Requested-By, or a video the admin does not own would be
-    refused after the backend's ownership change."""
+async def test_admin_retry_keeps_media_calls_on_the_service_identity(api_client, backend):
+    """The admin gate is the authorization: /retry, its video read and the
+    watch it starts must never send X-Requested-By, or a video the admin does
+    not own would be refused after the backend's ownership change. The
+    portal-token mint is the one exception (see the next two tests)."""
     video = await api_client.create_video("https://youtu.be/x", requested_by="telegram:1")
     bot = FakeBot()
     ctx = FakeContext(
@@ -167,9 +168,67 @@ async def test_admin_retry_stays_on_the_service_identity_end_to_end(api_client, 
         if r["path"].startswith(f"/api/v1/videos/{video['id']}")
     ]
     assert touched, "the retry path must call the video routes"
-    assert all(r["requested_by"] is None for r in touched), (
-        "/retry and its watch must stay on the service identity throughout"
+    service_calls = [
+        r for r in touched if not r["path"].endswith("/portal-link")
+    ]
+    assert all(r["requested_by"] is None for r in service_calls), (
+        "/retry and its watch must stay on the service identity"
     )
+    mints = [r for r in touched if r["path"].endswith("/portal-link")]
+    assert mints and all(r["requested_by"] == "telegram:999" for r in mints), (
+        "the portal-token mint must name the admin, not the service"
+    )
+
+
+async def test_admin_retry_by_a_linked_admin_keeps_the_portal_button(api_client, backend):
+    """The mint rides as the admin: the backend resolves them to a console
+    admin account, so the button survives on a retried video."""
+    video = await api_client.create_video("https://youtu.be/x", requested_by="telegram:1")
+    backend.linked[999] = {"email": "ops@example.com", "name": "Ops", "role": "admin"}
+    update = FakeUpdate(user_id=999)
+    ctx = _context(api_client, args=[video["id"]])
+
+    await retry_command(update, ctx)
+
+    markup = update.message.replies[0]["reply_markup"]
+    urls = [b.url for row in markup.inline_keyboard for b in row]
+    portal = f"https://portal.test/video/{video['id']}"
+    assert any(url and url.startswith(portal) and "?t=" in url for url in urls)
+    mints = [
+        r for r in backend.requests
+        if r["path"] == f"/api/v1/videos/{video['id']}/portal-link"
+    ]
+    assert mints and mints[0]["requested_by"] == "telegram:999"
+    await ctx.bot_data["watchers"].cancel_all()
+
+
+async def test_admin_retry_by_an_unlinked_admin_fails_closed_on_the_portal(
+    api_client, backend
+):
+    """An ADMIN_TELEGRAM_IDS-only admin is not a console principal, so the
+    backend refuses the mint. The retry still runs; only the button is gone."""
+    video = await api_client.create_video("https://youtu.be/x", requested_by="telegram:1")
+    update = FakeUpdate(user_id=999)  # admin via the env list only
+    ctx = _context(api_client, args=[video["id"]])
+
+    await retry_command(update, ctx)
+
+    assert "Re-queued" in update.message.replies[0]["text"]
+    assert any(
+        r["path"] == f"/api/v1/videos/{video['id']}/retry"
+        for r in backend.requests
+    ), "the retry itself must still be sent"
+    markup = update.message.replies[0]["reply_markup"]
+    urls = (
+        []
+        if markup is None
+        else [b.url for row in markup.inline_keyboard for b in row if b.url]
+    )
+    assert all("/portal.test/" not in url for url in urls), (
+        "a refused mint must leave no portal button (fail closed)"
+    )
+    assert backend.portal_links == [], "the fake must refuse, not mint"
+    await ctx.bot_data["watchers"].cancel_all()
 
 
 async def test_admin_retry_threads_the_console_link_into_the_watch(api_client, backend):

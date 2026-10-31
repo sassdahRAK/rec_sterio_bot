@@ -829,7 +829,11 @@ async def test_an_oversize_unit_without_artifact_degrades_and_points_at_the_port
     video_id = await _oversizable_video(api_client, backend, "media-not-ready")
     bot = FakeBot()
 
-    delivered = await deliver_media(bot, 42, api_client, video_id)
+    # As the video's creator: production always names the asking user, and the
+    # portal mint (like the backend) refuses a header-less call.
+    delivered = await deliver_media(
+        bot, 42, api_client, video_id, requested_by="telegram:1"
+    )
 
     assert delivered is False
     assert not any(m.get("document") is not None for m in bot.sent), (
@@ -858,7 +862,9 @@ async def test_an_oversize_unit_whose_variant_fails_keeps_the_portal_explanation
     backend.compressed_failure = (500, "compress_failed", "The encoder gave up.")
     bot = FakeBot()
 
-    delivered = await deliver_media(bot, 42, api_client, video_id)
+    delivered = await deliver_media(
+        bot, 42, api_client, video_id, requested_by="telegram:1"
+    )
 
     assert delivered is False
     notice = bot.sent[-1]
@@ -1104,7 +1110,9 @@ async def test_an_unknown_size_oversize_unit_without_artifact_points_at_the_port
     backend.media_bytes = b"y" * (MAX_UPLOAD_BYTES + 10)
     bot = FakeBot()
 
-    delivered = await deliver_media(bot, 42, api_client, video_id)
+    delivered = await deliver_media(
+        bot, 42, api_client, video_id, requested_by="telegram:1"
+    )
 
     assert delivered is False
     assert not any(m.get("document") is not None for m in bot.sent)

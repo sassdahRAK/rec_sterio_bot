@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from bot.client import ApiError
 from bot.config import Settings
 from bot.handlers.status import status_command
 from bot.helpers import portal_button, portal_token_for, portal_url, web_links
@@ -222,7 +223,10 @@ def test_trailing_slashes_and_a_console_subpath_shape_the_urls_correctly():
 
 
 async def test_the_portal_button_carries_the_backend_token(api_client, backend):
-    video = await api_client.create_video("https://youtu.be/token")
+    # The mint is evaluated as the reader, so the unit must be theirs.
+    video = await api_client.create_video(
+        "https://youtu.be/token", requested_by=f"telegram:{NON_ADMIN}"
+    )
     vid = video["id"]
 
     portal = await portal_token_for(
@@ -285,7 +289,9 @@ async def test_a_failed_token_call_still_yields_the_bare_portal_url(
 
 
 async def test_a_loopback_portal_url_is_dropped_even_with_a_token(api_client, backend):
-    video = await api_client.create_video("https://youtu.be/loopback")
+    video = await api_client.create_video(
+        "https://youtu.be/loopback", requested_by=f"telegram:{NON_ADMIN}"
+    )
     vid = video["id"]
     portal = await portal_token_for(
         api_client, vid, requested_by=f"telegram:{NON_ADMIN}"
@@ -440,3 +446,21 @@ async def test_an_infrastructure_failure_keeps_the_bare_url_when_access_is_known
     assert all("?t=" not in url for url in urls)
     mints = _portal_mints(backend, vid)
     assert mints and mints[0]["requested_by"] == f"telegram:{NON_ADMIN}"
+
+
+async def test_the_fake_refuses_a_portal_mint_with_no_identity(api_client, backend):
+    """Guard against the regression recurring: the real route refuses the bare
+    service identity, so a bot that drops ``requested_by`` cannot mint."""
+    video = await api_client.create_video(
+        "https://youtu.be/no-identity", requested_by=f"telegram:{NON_ADMIN}"
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await api_client.get_portal_link(video["id"])
+
+    assert excinfo.value.status_code == 403
+    assert backend.portal_links == [], "the fake must refuse, not mint"
+    portal = await portal_token_for(api_client, video["id"])
+    assert portal.token is None and portal.forbidden is True, (
+        "a header-less mint must fail closed, never degrade to the bare page"
+    )

@@ -58,11 +58,11 @@ class FakeBackend:
         self.portal_links: list[str] = []
         #: when set, POST /videos/{id}/portal-link answers this failure instead
         self.portal_link_failure: tuple[int, str, str] | None = None
-        #: ``X-Requested-By`` actors the portal-link route refuses with 403,
-        #: mirroring the real guard that evaluates the end user's access to
-        #: the named video. Matching on the header is deliberate: a bot that
-        #: drops ``requested_by`` is not refused here, so the "no button"
-        #: tests can only pass when the identity is actually sent.
+        #: extra ``X-Requested-By`` actors the portal-link route refuses with
+        #: 403 on top of its production rule (mint only for the unit's creator,
+        #: or for a caller the fake marks as a console admin). Mirroring the
+        #: real guard means a bot that drops ``requested_by`` is refused
+        #: outright instead of silently minting with service rights.
         self.portal_link_denied: set[str] = set()
         self.requests: list[dict[str, Any]] = []
         #: bodies received by POST /videos/upload (size, content type, attribution)
@@ -153,6 +153,25 @@ class FakeBackend:
         if folder is not None and folder.get("visibility") == "public":
             return None
         return self._error(403, "forbidden", "You do not have access to this video.")
+
+    def _portal_actor_is_admin(self, actor: str) -> bool:
+        """Whether the fake marks ``telegram:<uid>`` as a console admin.
+
+        The backend's portal-link guard accepts an admin-tier principal or the
+        unit's creator. An admin-tier principal here is a linked account whose
+        role is ``admin`` (``linked`` and the ``admin_ids`` it feeds); the
+        operator's env allow-list is not visible to the backend, so an
+        unlinked admin is deliberately *not* an admin tier.
+        """
+        if not actor.startswith("telegram:"):
+            return False
+        try:
+            uid = int(actor.split(":", 1)[1])
+        except ValueError:
+            return False
+        if uid in self.admin_ids:
+            return True
+        return (self.linked.get(uid) or {}).get("role") == "admin"
 
     def _maybe_fail(self) -> PlainTextResponse | None:
         if self.fail_next is None:
@@ -894,13 +913,32 @@ class FakeBackend:
             if self.portal_link_failure is not None:
                 status, code, message = self.portal_link_failure
                 return self._error(status, code, message)
+            # Mirror the real guard: a mint always names its caller. The bare
+            # service identity is refused, and a named actor may only mint for
+            # a unit they created or when the fake marks them as a console
+            # admin. A bot that drops ``requested_by`` therefore fails here
+            # instead of minting with service rights.
             requested_by = request.headers.get("x-requested-by")
-            if requested_by and requested_by in self.portal_link_denied:
+            if not requested_by:
+                return self._error(
+                    403,
+                    "forbidden",
+                    "X-Requested-By is required to mint a portal link.",
+                )
+            if requested_by in self.portal_link_denied:
                 return self._error(
                     403, "forbidden", "You do not have access to this video."
                 )
-            if video_id not in self.videos:
+            video = self.videos.get(video_id)
+            if video is None:
                 return self._error(404, "not_found", f"No video {video_id}.")
+            if (
+                video.get("created_by") != requested_by
+                and not self._portal_actor_is_admin(requested_by)
+            ):
+                return self._error(
+                    403, "forbidden", "You do not have access to this video."
+                )
             token = f"tkn-{video_id}"
             self.portal_links.append(video_id)
             return {
