@@ -144,7 +144,7 @@ def _folder_line(node: Mapping[str, Any], depth: int = 0) -> list[str]:
     count = node.get("video_count", 0)
     role = escape_markdown(str(node.get("my_role") or "-"))
     lines = [
-        f"{'  ' * depth}{lock} *{name}* — {count} video(s) · role `{role}`"
+        f"{'  ' * depth}{lock} *{name}*: {count} video(s) · role `{role}`"
     ]
     lines.append(f"{'  ' * depth}  `{node.get('id', '?')}`")
     for child in node.get("children") or []:
@@ -223,7 +223,7 @@ async def folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     lock = "🌐 public" if node.get("visibility") == "public" else "🔒 private"
-    owner = escape_markdown(str(node.get("owner_email") or "—"))
+    owner = escape_markdown(str(node.get("owner_email") or "unknown"))
     name = escape_markdown(str(node.get("name") or "(untitled)"))
     description = node.get("description")
     lines = [
@@ -243,7 +243,7 @@ async def folder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             child_lock = "🌐" if child.get("visibility") == "public" else "🔒"
             child_name = escape_markdown(str(child.get("name") or "(untitled)"))
             lines.append(
-                f"{child_lock} *{child_name}* — {child.get('video_count', 0)} video(s)"
+                f"{child_lock} *{child_name}*: {child.get('video_count', 0)} video(s)"
             )
             lines.append(f"  `{child.get('id', '?')}`")
 
@@ -550,7 +550,7 @@ async def passcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     code = passcode.get("code")
     if not code:
         # Only a caller-supplied code is not echoed back by the API.
-        code = "(set by you — the server does not echo it back)"
+        code = "(set by you, because the server does not echo it back)"
 
     limits = []
     if max_uses:
@@ -566,7 +566,7 @@ async def passcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await message.reply_text(
         f"🔑 Passcode for `{folder_id}`\n"
         f"`{escape_markdown(str(code))}`\n"
-        f"Save it now — it is shown once{suffix}.",
+        f"Save it now: it is shown once{suffix}.",
         parse_mode=ParseMode.MARKDOWN,
     )
 

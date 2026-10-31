@@ -36,7 +36,7 @@ async def test_link_message_creates_video_and_replies_with_id(api_client, backen
     assert len(update.message.replies) == 1
     reply = update.message.replies[0]["text"]
     assert "Queued for download" in reply
-    assert "video id" in reply
+    assert "Video id" in reply
 
     # the id in the reply is the id of the video the backend created
     assert len(backend.videos) == 1

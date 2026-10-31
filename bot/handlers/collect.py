@@ -113,7 +113,7 @@ def _clear(context: ContextTypes.DEFAULT_TYPE) -> None:
 def _format_record(video: Mapping[str, Any]) -> str:
     """Render the TvNa block exactly as the platform's schema lists it."""
     def field(name: str, value: Any) -> str:
-        text = str(value).strip() if value not in (None, "") else "—"
+        text = str(value).strip() if value not in (None, "") else "not set"
         return f"{name}: {escape_markdown(text)}"
 
     lines = [
@@ -413,7 +413,7 @@ async def records_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lines = ["*Recent RecSterio records*"]
     for video in recorded:
         lines.append(
-            f"- `{video.get('tvna_id')}` · {escape_markdown(str(video.get('location_tag') or '—'))}"
+            f"- `{video.get('tvna_id')}` · {escape_markdown(str(video.get('location_tag') or 'not set'))}"
             f" · {video.get('platform', '?')}"
         )
     await message.reply_text(

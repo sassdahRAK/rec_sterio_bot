@@ -87,7 +87,7 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 status=escape_markdown(job.get("status", "?")),
                 attempts=job.get("attempts", "?"),
                 max_attempts=job.get("max_attempts", "?"),
-                video=job.get("video_id") or "—",
+                video=job.get("video_id") or "none",
             )
         )
         if job.get("last_error"):

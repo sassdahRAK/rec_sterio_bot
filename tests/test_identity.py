@@ -144,7 +144,7 @@ async def test_confirm_callback_links_and_refreshes_the_admin_cache(api_client, 
     }
     assert backend.linked[UID]["email"] == EMAIL
     text = update.callback_query.edits[-1]["text"]
-    assert "Linked — this Telegram is now" in text
+    assert "Linked. This Telegram is now" in text
     assert EMAIL in text
     # the fresh link may grant admin rights, so the cache was refreshed now
     assert cache.ids == frozenset({UID})
@@ -172,7 +172,7 @@ async def test_confirm_callback_with_a_stale_code_says_so(api_client, backend):
     await identity.on_callback(update, _context(api_client))
 
     assert update.callback_query.edits[-1]["text"] == (
-        "That code is no longer valid — generate a fresh one from the console."
+        "That code is no longer valid, so generate a fresh one from the console."
     )
 
 
@@ -188,7 +188,7 @@ async def test_whoami_unlinked_shows_id_and_no_link(api_client, backend):
     assert f"Telegram id: {UID}" in text
     assert "@tester" in text
     assert "No linked console account" in text
-    assert "not set up — run /cookies" in text
+    assert "not set up, so run /cookies" in text
     assert "Bot admin: no" in text
 
 

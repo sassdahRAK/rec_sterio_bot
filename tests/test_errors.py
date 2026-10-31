@@ -146,5 +146,5 @@ async def test_global_error_handler_handles_unexpected_errors():
     await error_handler(update, ctx)
 
     text = update.message.replies[0]["text"]
-    assert text == "Something went wrong on our side — please try again in a moment."
+    assert text == "Something went wrong on our side, so please try again in a moment."
     assert "kaboom" not in text
