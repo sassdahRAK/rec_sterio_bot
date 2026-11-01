@@ -1,10 +1,10 @@
-"""`/cookies` — per-user cookies + consent gate for TikTok/Facebook downloads.
+"""`/cookies` — optional per-user cookies, never a precondition.
 
-TikTok and Facebook refuse most server-side downloads, so a link alone is
-often not enough: the fetch has to ride on a logged-in browser session. The
-session the bot may use is the user's own — and only with their explicit
-agreement. Both the consent record and the cookies.txt live behind the
-backend's ``/bot-users/{telegram_id}`` endpoints, one record per user.
+Downloads run without cookies by default; a logged-in session is only an
+override for the day a platform refuses the server. A user who wants to supply
+their own cookies.txt agrees once, and both the consent record and the file
+live behind the backend's ``/bot-users/{telegram_id}`` endpoints. The operator
+also keeps a shared jar the worker falls back to.
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ __all__ = [
     "CONSENT_REQUIRED_HINT",
     "CONSENT_TEXT",
     "CONSENT_VERSION",
+    "blocked_download_hint",
     "consent_required_hint",
     "cookies_command",
     "handle_cookies_document",
@@ -74,9 +75,10 @@ CONSENT_REQUIRED_HINT = (
     "will download."
 )
 
-#: Details-aware variants of the hint. The backend may attach
-#: ``{"consented": bool, "cookies_present": bool}`` to a consent_required
-#: error so the bot can name the exact step the user is missing.
+#: Details-aware variants of the hint. Older deployments may attach
+#: ``{"consented": bool, "cookies_present": bool, "shared_cookies_available":
+#: bool}`` to a consent_required error. The current backend does not gate on
+#: cookies, so this is compatibility handling that rarely fires.
 _HINT_NOT_CONSENTED = (
     "This platform needs your own cookies first. Run /cookies in a private "
     "chat with me and tap I agree."
@@ -100,10 +102,34 @@ _GROUP_DOCUMENT = (
     "the file there."
 )
 _AGREE_ACK = (
-    "Agreement recorded. That alone is not enough: TikTok and Facebook links "
-    "stay refused until your cookies.txt file is on record.\n\n"
-    "Now send me the cookies.txt file as a document (paperclip, then File)."
+    "Agreement recorded. You are all set.\n\n"
+    "Send me the link you want to download now."
 )
+
+#: A platform refusing the server session. Cookies are the optional fallback,
+#: so this wording offers /cookies instead of demanding a file. Mirrors the
+#: backend downloader's block markers, kept local so the bot needs no backend
+#: import.
+_BLOCK_SIGNAL_MARKERS = (
+    "unexpected response from webpage request",
+    "captcha",
+    "blocked",
+    "bot check",
+    "please verify",
+    "confirm you're not a robot",
+)
+
+
+def blocked_download_hint(error: Any) -> str | None:
+    """Cookie guidance for a failed download, only on a real block signal."""
+    text = str(error or "").lower()
+    if not any(marker in text for marker in _BLOCK_SIGNAL_MARKERS):
+        return None
+    return (
+        "The platform refused this server session. You can paste the link "
+        "again later, or run /cookies to add your own cookies.txt as a "
+        "fallback. Nothing is required."
+    )
 
 
 def _consent_details(details: Any) -> Mapping[str, Any] | None:
@@ -121,6 +147,7 @@ def _consent_details(details: Any) -> Mapping[str, Any] | None:
             item.get("issue") == "consent_required"
             or isinstance(item.get("consented"), bool)
             or isinstance(item.get("cookies_present"), bool)
+            or isinstance(item.get("shared_cookies_available"), bool)
         ):
             return item
     return None
@@ -137,10 +164,13 @@ def consent_required_hint(details: Any = None) -> str:
     if entry is not None:
         consented = entry.get("consented")
         cookies_present = entry.get("cookies_present")
+        shared_available = entry.get("shared_cookies_available")
         if isinstance(consented, bool) and isinstance(cookies_present, bool):
             if not consented:
                 return _HINT_NOT_CONSENTED
-            if not cookies_present:
+            if not cookies_present and not (
+                isinstance(shared_available, bool) and shared_available
+            ):
                 return _HINT_NO_FILE
             # Both are true: the refusal is not about cookies, so say nothing
             # about them rather than inventing a cause.
@@ -157,6 +187,8 @@ def _status_line(record: Mapping[str, Any] | None) -> str:
     if record is not None and record.get("cookies_present"):
         when = record.get("cookies_updated_at") or "unknown"
         file_line = f"Status: cookies on file (updated {when})."
+    elif record is not None and record.get("shared_cookies_available"):
+        file_line = "Status: using the shared team cookies."
     else:
         file_line = "Status: No cookies file on record yet."
     consented = bool(record.get("consented")) if record is not None else False
@@ -361,9 +393,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 exc.user_message(), parse_mode=ParseMode.MARKDOWN
             )
             return
-        # The agreement is only step one. Leave the file step pending so a
-        # misplaced document in this chat can be answered specifically.
-        _set_awaiting_file(context, True)
+        # Consent no longer implies a pending file. The upload path stays open:
+        # a document literally named cookies.txt is still stored, and /cookies
+        # re-enters the flow for anyone who wants to supply one.
+        _set_awaiting_file(context, False)
         await query.edit_message_text(_AGREE_ACK)
         return
 

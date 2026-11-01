@@ -1,8 +1,9 @@
-"""The per-user cookies + consent gate (TikTok/Facebook link downloads).
+"""Optional per-user cookies; never a precondition for a download.
 
-Flow: /cookies (private chat) → status + consent text → I agree → the user
-sends cookies.txt as a document → their downloads ride their own session.
-Any time: /cookies → Remove my data deletes the file and the record.
+Normal flow: paste a link and it is queued, cookies or not. If a platform
+refuses the server, the bot offers /cookies as a fallback: status + consent
+text, I agree, then optionally a cookies.txt document. Own file beats the
+shared jar. Any time: /cookies then Remove my data deletes the record.
 """
 from __future__ import annotations
 
@@ -245,6 +246,46 @@ async def test_status_shows_the_file_first_when_it_is_present(api_client, backen
     assert "consent" not in first_line.lower()
 
 
+async def test_status_reports_the_shared_jar_when_there_is_no_own_file(
+    api_client, backend
+):
+    backend.bot_users[UID] = {
+        "telegram_id": UID,
+        "consented": True,
+        "consented_at": "2026-10-28T00:00:00Z",
+        "consent_version": CONSENT_VERSION,
+        "cookies_present": False,
+        "shared_cookies_available": True,
+        "cookies_updated_at": None,
+    }
+    update = FakeUpdate("/cookies", user_id=UID)
+    await cookies_command(update, FakeContext(bot_data={"api": api_client}))
+
+    text = update.message.replies[-1]["text"]
+    first_line = text.split("\n", 1)[0]
+    assert "shared team cookies" in first_line
+    assert "No cookies file on record yet" not in first_line
+    assert text.split("\n", 1)[1].startswith("Agreement status:")
+
+
+async def test_status_prefers_the_own_file_over_the_shared_jar(api_client, backend):
+    backend.bot_users[UID] = {
+        "telegram_id": UID,
+        "consented": True,
+        "consented_at": "2026-10-28T00:00:00Z",
+        "consent_version": CONSENT_VERSION,
+        "cookies_present": True,
+        "shared_cookies_available": True,
+        "cookies_updated_at": "2026-10-28T00:00:00Z",
+    }
+    update = FakeUpdate("/cookies", user_id=UID)
+    await cookies_command(update, FakeContext(bot_data={"api": api_client}))
+
+    first_line = update.message.replies[-1]["text"].split("\n", 1)[0]
+    assert "cookies on file" in first_line
+    assert "shared" not in first_line
+
+
 # ------------------------------------------------------------------ buttons
 
 
@@ -261,20 +302,21 @@ async def test_agree_button_records_consent_with_version(api_client, backend):
     assert record["consented"] is True
     assert record["consent_version"] == "2026-10-28.1"
 
-    assert "cookies.txt" in update.callback_query.edits[-1]["text"]
+    assert "all set" in update.callback_query.edits[-1]["text"]
 
 
-async def test_agree_reply_says_consent_alone_is_not_enough(api_client, backend):
+async def test_agree_reply_does_not_demand_a_file(api_client, backend):
+    """Cookies are optional; consent is a record, not a second step."""
     update = CallbackUpdate("cookies:agree")
     ctx = FakeContext(bot_data={"api": api_client})
     await on_callback(update, ctx)
 
     text = update.callback_query.edits[-1]["text"]
-    assert "not enough" in text, "the reply must not read as completion"
-    assert "cookies.txt" in text, "the file step must be named"
-    assert "refused" in text, "the consequence must be stated"
-    assert "TikTok" in text and "Facebook" in text
-    assert ctx.user_data.get("cookies_awaiting_file") is True
+    assert "all set" in text
+    assert "link" in text, "the next action is pasting a link"
+    assert "cookies.txt" not in text, "no file may be demanded"
+    assert "not enough" not in text
+    assert ctx.user_data.get("cookies_awaiting_file") is not True
 
 
 async def test_agree_button_maps_version_mismatch(api_client, backend):
@@ -543,22 +585,28 @@ async def test_upload_network_failure_is_reported(api_client, backend):
     assert "network" in replies.lower()
 
 
-# ------------------------------------------------------- the download gates
+# ------------------------------------- cookies are optional, not a precondition
 
 
-async def test_link_gate_blocks_tiktok_without_consent(api_client, backend):
-    backend.enforce_consent_gate = True
+async def test_a_tiktok_link_is_queued_without_consent_or_cookies(api_client, backend):
+    """The normal path: nothing to set up, paste the link."""
     update = FakeUpdate(TIKTOK_URL, user_id=UID)
-    await handle_link(update, FakeContext(bot_data={"api": api_client}))
+    ctx = FakeContext(
+        bot_data={
+            "api": api_client,
+            "settings": _settings(),
+            "watchers": WatchRegistry(),
+        }
+    )
+    await handle_link(update, ctx)
+    await ctx.bot_data["watchers"].cancel_all()
 
-    assert "/cookies" in update.message.replies[-1]["text"]
-    # The fake records every incoming request, gate-rejected included — the
-    # load-bearing assertion is that nothing was queued.
-    assert not backend.videos, "no video may be created behind the gate"
+    assert "Queued for download" in update.message.replies[-1]["text"]
+    assert not any("/cookies" in r["text"] for r in update.message.replies)
+    assert len(backend.videos) == 1
 
 
-async def test_link_gate_lets_a_consented_user_through(api_client, backend):
-    backend.enforce_consent_gate = True
+async def test_a_tiktok_link_is_queued_with_consent_and_cookies_too(api_client, backend):
     await _consent(api_client)
     await _upload_cookies(api_client)
 
@@ -578,7 +626,18 @@ async def test_link_gate_lets_a_consented_user_through(api_client, backend):
     assert len(_requests(backend, "POST", "/api/v1/videos")) == 1
 
 
-async def test_collect_url_step_maps_consent_required(api_client, backend):
+async def test_collect_url_step_queues_without_cookies(api_client, backend):
+    update = FakeUpdate(TIKTOK_URL, user_id=UID)
+    ctx = FakeContext(bot_data={"api": api_client}, user_data={})
+
+    state = await collect.receive_url(update, ctx)
+
+    assert state == collect.ASK_LOCATION
+    assert backend.videos
+
+
+async def test_collect_url_step_still_maps_an_old_backend_403(api_client, backend):
+    """Compatibility: an older deployment may still send consent_required."""
     backend.fail_next = (
         403,
         "consent_required",
@@ -593,28 +652,19 @@ async def test_collect_url_step_maps_consent_required(api_client, backend):
     assert "/cookies" in update.message.replies[-1]["text"]
 
 
-async def test_collect_url_step_hits_the_real_gate(api_client, backend):
-    backend.enforce_consent_gate = True
-    update = FakeUpdate(TIKTOK_URL, user_id=UID)
-    ctx = FakeContext(bot_data={"api": api_client}, user_data={})
-
-    state = await collect.receive_url(update, ctx)
-
-    assert state == collect.ASK_URL
-    assert "/cookies" in update.message.replies[-1]["text"]
-    assert not backend.videos, "no video may be created behind the gate"
-
-
-def _consent_error(consented: bool, cookies_present: bool) -> list[dict]:
-    """The exact details shape the backend emits: a LIST of field entries."""
-    return [
-        {
-            "field": "source_url",
-            "issue": "consent_required",
-            "consented": consented,
-            "cookies_present": cookies_present,
-        }
-    ]
+def _consent_error(
+    consented: bool, cookies_present: bool, shared_available: bool | None = None
+) -> list[dict]:
+    """The details shape an older backend emitted: a LIST of field entries."""
+    entry = {
+        "field": "source_url",
+        "issue": "consent_required",
+        "consented": consented,
+        "cookies_present": cookies_present,
+    }
+    if shared_available is not None:
+        entry["shared_cookies_available"] = shared_available
+    return [entry]
 
 
 @pytest.mark.parametrize(
@@ -622,6 +672,8 @@ def _consent_error(consented: bool, cookies_present: bool) -> list[dict]:
     [
         (_consent_error(False, False), "I agree", "not enough"),
         (_consent_error(True, False), "not enough", None),
+        # The shared jar makes the file step unnecessary.
+        (_consent_error(True, False, True), "cookie", None),
         # Backwards compatibility: a bare mapping instead of a list.
         ({"consented": False, "cookies_present": False}, "I agree", None),
         ({"consented": True, "cookies_present": True}, "cookie", None),
@@ -640,6 +692,23 @@ def test_consent_hint_reads_every_details_shape(
     assert must_contain in text
     if must_not_contain:
         assert must_not_contain not in text
+
+
+def test_the_parser_reads_the_shared_key_from_the_list_shape():
+    entry = cookies_mod._consent_details(
+        [{"field": "source_url", "shared_cookies_available": True}]
+    )
+    assert entry is not None and entry["shared_cookies_available"] is True
+
+
+def test_block_signal_offers_cookies_as_a_fallback():
+    hint = cookies_mod.blocked_download_hint(
+        "TikTok blocked this request: captcha required"
+    )
+    assert hint is not None
+    assert "/cookies" in hint
+    assert "required" in hint, "the wording offers, it does not demand"
+    assert cookies_mod.blocked_download_hint("network timeout") is None
 
 
 async def test_link_hint_names_consent_when_the_backend_says_so(

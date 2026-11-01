@@ -23,7 +23,7 @@ from ..helpers import (
     web_links,
 )
 from ..keyboards import video_keyboard
-from .cookies import consent_required_hint
+from .cookies import blocked_download_hint, consent_required_hint
 from .media import deliver_media
 
 logger = logging.getLogger(__name__)
@@ -235,6 +235,11 @@ async def _notify_terminal(
             f"Error: {escape_markdown(video.get('error') or 'unknown error')}\n"
             "Ask an admin to retry the job with /retry."
         )
+        # Only a real block signal suggests cookies, and even then as an
+        # optional fallback: nothing about the normal path requires a file.
+        hint = blocked_download_hint(video.get("error"))
+        if hint:
+            text = f"{text}\n\n{hint}"
     else:
         text = (
             f"✅ *Transcript ready* for video `{video_id}`\n"

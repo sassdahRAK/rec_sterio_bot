@@ -119,6 +119,39 @@ async def test_watch_reports_failure(api_client, backend):
     assert any("Processing failed" in m["text"] for m in bot.sent)
 
 
+async def test_a_blocked_download_offers_cookies_as_a_fallback(api_client, backend):
+    backend.status_script = ["pending", "failed"]
+    bot = FakeBot()
+    video = await api_client.create_video("https://youtu.be/xyz", requested_by="telegram:7")
+    backend.videos[video["id"]]["error"] = "TikTok blocked this request: captcha required"
+
+    status = await watch_video(
+        api_client, bot, 42, video["id"], interval=0.0, timeout=5.0
+    )
+
+    assert status == "failed"
+    failed = [m["text"] for m in bot.sent if "Processing failed" in m.get("text", "")]
+    assert failed
+    assert "/cookies" in failed[-1]
+    assert "Nothing is required" in failed[-1]
+
+
+async def test_a_plain_failure_does_not_mention_cookies(api_client, backend):
+    backend.status_script = ["pending", "failed"]
+    bot = FakeBot()
+    video = await api_client.create_video("https://youtu.be/xyz", requested_by="telegram:7")
+    backend.videos[video["id"]]["error"] = "yt-dlp exited with code 1"
+
+    status = await watch_video(
+        api_client, bot, 42, video["id"], interval=0.0, timeout=5.0
+    )
+
+    assert status == "failed"
+    failed = [m["text"] for m in bot.sent if "Processing failed" in m.get("text", "")]
+    assert failed
+    assert "/cookies" not in failed[-1]
+
+
 async def test_watch_auto_delivers_the_media_at_downloaded(api_client, backend):
     """instruction.txt #2: the finished file is sent to the chat automatically."""
     bot = FakeBot()
