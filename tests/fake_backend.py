@@ -94,14 +94,19 @@ class FakeBackend:
         self.link_redeems: list[dict[str, Any]] = []
         #: bodies received by POST /bot-users/{uid}/cookies (multipart)
         self.cookie_uploads: list[dict[str, Any]] = []
+        #: what POST /bot-users/{uid}/cookies reports as ``cookies_present``.
+        #: None keeps the contract default (the file lands, True); False models
+        #: a 2xx that stored nothing, so the bot must not claim success.
+        self.upload_cookies_present: bool | None = None
         #: the consent version a POST must match; mismatch → 422
         self.consent_version: str = DEFAULT_CONSENT_VERSION
         #: when True, POST /videos answers 403 consent_required for a
         #: tiktok/facebook URL from a telegram user without consent + cookies.
         #: Off by default so the pre-gate link tests keep their behaviour.
         self.enforce_consent_gate = False
-        #: when set, the next request raises this HTTP status with this body
-        self.fail_next: tuple[int, str, str] | None = None
+        #: when set, the next request raises this HTTP status with this body.
+        #: A 4-tuple may carry an optional ``details`` payload.
+        self.fail_next: tuple[int, str, str] | tuple[int, str, str, Any] | None = None
         self.app = FastAPI(title="fake-recsterio")
         self._register_routes()
 
@@ -176,14 +181,18 @@ class FakeBackend:
     def _maybe_fail(self) -> PlainTextResponse | None:
         if self.fail_next is None:
             return None
-        status, code, message = self.fail_next
+        if len(self.fail_next) == 4:
+            status, code, message, details = self.fail_next
+        else:
+            status, code, message = self.fail_next
+            details = None
         self.fail_next = None
         if status >= 500:
             return PlainTextResponse(
                 f"<html><body>Internal Server Error: {code} {message}</body></html>",
                 status_code=status,
             )
-        return self._error(status, code, message)
+        return self._error(status, code, message, details)
 
     def _transcripts_for(self, video: dict[str, Any]) -> list[dict[str, Any]]:
         if video.get("status") != "transcribed":
@@ -1346,11 +1355,17 @@ class FakeBackend:
             record = self.bot_users.setdefault(
                 telegram_id, self._empty_bot_user(telegram_id)
             )
-            record["cookies_present"] = True
-            record["cookies_updated_at"] = "2026-10-28T00:00:00Z"
+            present = (
+                True
+                if self.upload_cookies_present is None
+                else bool(self.upload_cookies_present)
+            )
+            if present:
+                record["cookies_present"] = True
+                record["cookies_updated_at"] = "2026-10-28T00:00:00Z"
             return {
-                "cookies_present": True,
-                "cookies_updated_at": record["cookies_updated_at"],
+                "cookies_present": present,
+                "cookies_updated_at": record.get("cookies_updated_at"),
             }
 
 

@@ -99,13 +99,15 @@ def register_handlers(app: Application) -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, _text_router)
     )
 
-    # A cookies.txt in a private chat (the /cookies flow's second step).
-    # Registered BEFORE the media catch-all: a group runs only the first
-    # matching handler, and a .txt is not in uploads' ALLOWED_SUFFIXES, so
-    # this must win the race for it.
+    # The /cookies flow's second step. Every document comes here so the
+    # handler can judge it by content: media goes straight back to uploads, a
+    # text file is treated as cookies only while the user is in the flow, and
+    # a document sent in a group is told to use a private chat. Registered
+    # BEFORE the media catch-all: a group runs only the first matching
+    # handler, so the hand-off must be an explicit call, not a fall-through.
     app.add_handler(
         MessageHandler(
-            filters.Document.FileExtension("txt") & filters.ChatType.PRIVATE,
+            filters.Document.ALL,
             cookies.handle_cookies_document,
         )
     )

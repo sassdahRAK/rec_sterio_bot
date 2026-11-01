@@ -27,7 +27,7 @@ from telegram.ext import (
 
 from ..client import ApiError, ApiNetworkError
 from ..helpers import BOT_NOT_READY, actor_for, escape_markdown, extract_url, get_client
-from .cookies import CONSENT_REQUIRED_HINT
+from .cookies import consent_required_hint
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,9 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         if getattr(exc, "code", "") == "consent_required":
             # The wizard stays on the URL step: run /cookies (which works as a
             # command even mid-wizard), then paste the link again.
-            await message.reply_text(CONSENT_REQUIRED_HINT)
+            await message.reply_text(
+                consent_required_hint(getattr(exc, "details", None))
+            )
             return ASK_URL
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return ASK_URL

@@ -23,7 +23,7 @@ from ..helpers import (
     web_links,
 )
 from ..keyboards import video_keyboard
-from .cookies import CONSENT_REQUIRED_HINT
+from .cookies import consent_required_hint
 from .media import deliver_media
 
 logger = logging.getLogger(__name__)
@@ -318,7 +318,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if getattr(exc, "code", "") == "consent_required":
             # The platform needs the user's own session: point at /cookies
             # instead of dumping the raw error envelope at them.
-            await message.reply_text(CONSENT_REQUIRED_HINT)
+            await message.reply_text(
+                consent_required_hint(getattr(exc, "details", None))
+            )
             return
         await message.reply_text(exc.user_message(), parse_mode=ParseMode.MARKDOWN)
         return
